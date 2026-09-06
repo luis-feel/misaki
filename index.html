@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>BodegaExpress</title>
+  <!-- Tailwind CSS vía CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#eff6ff',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',900:'#0f172a' }
+          }
+        }
+      }
+    }
+  </script>
+  <!-- Dexie.js (IndexedDB) -->
+  <script src="https://unpkg.com/dexie@3.2.6/dist/dexie.min.js"></script>
+  <!-- Supabase JS -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <style>
+    html,body{height:100%;}
+    body{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:#f1f5f9;}
+    .no-scrollbar::-webkit-scrollbar{display:none;}
+    .no-scrollbar{-ms-overflow-style:none;scrollbar-width:none;}
+    .fade-in{animation:fadeIn .25s ease-out;}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+    .slide-up{animation:slideUp .3s ease-out;}
+    @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+    input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+  </style>
+</head>
+<body class="text-slate-800">
+  <div id="app"></div>
+
+  <!-- ============================ APP JS ============================ -->
+  <script type="module">
+    /* ============================================================
+       BodegaExpress — App autónoma
+       Configura aquí tus credenciales de Supabase (Project URL + anon key)
+       ============================================================ */
+    const SUPABASE_URL = "https://ycbuzyczxrbclckabkow.supabase.co";   // <-- REEMPLAZAR
+    const SUPABASE_KEY  = "sb_publishable_fecbB60tAvSsHUZFf3OmYg_CFqG2NVW";                       // <-- REEMPLAZAR
+    const STORAGE_BUCKET = "productos";                        // bucket de Storage
+
+    const SUCURSALES = ["M1","M2","M3","C1","C2","R1"];
+
+    /* ---------- Supabase client ---------- */
+    let supabase = null;
+    try {
+      if (window.supabase && SUPABASE_URL.startsWith("https://") && SUPABASE_KEY !== "TU-ANON-KEY") {
+        supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+      }
+    } catch(e){ console.warn("Supabase init falló:", e); }
+
+    /* ---------- Dexie (caché local offline) ---------- */
+    const db = new Dexie("BodegaExpressDB");
+    db.version(1).stores({
+      productos:            "id,codigo,nombre,creado_en,synced",
+      envios:               "id,producto_id,sucursal_destino,estado,fecha_envio,synced",
+      inventario_sucursal:   "id,producto_id,sucursal_id,synced",
+      confirmaciones_precios:"id,producto_id,sucursal_id,synced",
+      mermas_pendientes:    "id,envio_id,sucursal_id,synced",
+      usuarios:             "id,pin,rol,synced"
+    });
+
+    /* ---------- Estado global ---------- */
+    const state = {
+      user: null,
+      online: navigator.onLine,
+      lastSync: null,
+      view: "login",
+      toast: null,
+      priceNotifs: []
+    };
+
+    /* ============================================================
+       UTILIDADES
+       ============================================================ */
+    const $ = (sel, root=document) => root.querySelector(sel);
+    const el = (tag, props={}, ...children) => {
+      const node = document.createElement(tag);
+      Object.entries(props).forEach(([k,v]) => {
+        if(k==="class") node.className=v;
+        else if(k==="html") node.innerHTML=v;
+        else if(k.startsWith("on") && typeof v==="function") node.addEventListener(k.slice(2).toLowerCase(), v);
+        else if(k==="style" && typeof v==="object") Object.assign(node.style, v);
+        else node.setAttribute(k, v);
+      });
+      children.flat().forEach(c => {
+        if(c==null||c===false) return;
+        node.appendChild(typeof c==="string"||typeof c==="number" ? document.createTextNode(String(c)) : c);
+      });
+      return node;
+    };
+    const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-'+Date.now()+'-'+Math.random().toString(16).slice(2));
+    const fmtMoney = n => "$" + (Number(n||0)).toLocaleString("es-CL",{maximumFractionDigits:0});
+    const fmtDate = d => { if(!d) return "-"; const x=new Date(d); return x.toLocaleDateString("es-ES",{day:'2-digit',month:'2-digit',year:'numeric'})+" "+x.toLocaleTimeString("es-ES",{hour:'2-digit',minute:'2-digit'}); };
+    const timeAgo = d => {
+      if(!d) return "-";
+      const s = Math.floor((Date.now()-new Date(d).getTime())/1000);
+      if(s<60) return "hace "+s+" s";
+      if(s<3600) return "hace "+Math.floor(s/60)+" min";
+      if(s<86400) return "hace "+Math.floor(s/3600)+" h";
+      return "hace "+Math.floor(s/86400)+" d";
+    };
+    const escapeHtml = s => String(s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+    /* ---------- Toast ---------- */
+    function toast(msg, type="ok"){
+      state.toast = { msg, type };
+      renderToast();
+      setTimeout(()=>{ state.toast=null; renderToast(); }, 2600);
+    }
+    function renderToast(){
+      let t = $("#toast");
+      if(!state.toast){ if(t) t.remove(); return; }
+      if(!t){
+        t = el("div",{id:"toast",class:"fixed bottom-20 left-1/2 -translate-x-1/2 z-[100] px-5 py-3 rounded-xl shadow-lg text-white text-sm font-medium slide-up max-w-[90%] text-center"});
+        document.body.appendChild(t);
+      }
+      t.className = "fixed bottom-20 left-1/2 -translate-x-1/2 z-[100] px-5 py-3 rounded-xl shadow-lg text-white text-sm font-medium slide-up max-w-[90%] text-center " +
+        (state.toast.type==="ok" ? "bg-emerald-600" : state.toast.type==="warn" ? "bg-amber-500" : "bg-red-600");
+      t.textContent = state.toast.msg;
+    }
+
+    /* ============================================================
+       PARSEO POR VOZ — Motor inteligente de cantidades
+       ============================================================ */
+    const WORD_NUMS = { "cero":0,"uno":1,"dos":2,"tres":3,"cuatro":4,"cinco":5,"seis":6,"siete":7,"ocho":8,"nueve":9,"diez":10,"once":11,"doce":12,"trece":13,"catorce":14,"quince":15,"dieciseis":16,"diecisiete":17,"dieciocho":18,"diecinueve":19,"veinte":20,"veintiuno":21,"veintidos":22,"veintitres":23,"veinticuatro":24,"veinticinco":25,"veintiseis":26,"veintisiete":27,"veintiocho":28,"veintinueve":29,"treinta":30,"cuarenta":40,"cincuenta":50,"sesenta":60,"setenta":70,"ochenta":80,"noventa":90,"cien":100,"mil":1000 };
+
+    function wordsToNumber(token){
+      token = token.toLowerCase().trim();
+      if(/^\d+$/.test(token)) return parseInt(token,10);
+      if(WORD_NUMS[token]!==undefined) return WORD_NUMS[token];
+      // compuestos: "treinta y cinco"
+      let clean = token.replace(/\s+y\s/g," ").replace(/-/g," ");
+      const parts = clean.split(/\s+/);
+      let total = 0, current = 0, found = false;
+      for(const p of parts){
+        if(WORD_NUMS[p]!==undefined){
+          found = true;
+          if(WORD_NUMS[p]===1000){ current = (current||1)*1000; total += current; current=0; }
+          else if(WORD_NUMS[p]===100){ current = (current||1)*100; }
+          else { current += WORD_NUMS[p]; }
+        }
+      }
+      total += current;
+      return found ? total : null;
+    }
+
+    function parseVoice(text){
+      const norm = text.toLowerCase();
+      const tokens = norm.split(/[\s,;.]+/);
+      const numbers = [];
+      for(const tk of tokens){
+        const n = wordsToNumber(tk);
+        if(n!==null && n!==undefined && !isNaN(n)) numbers.push(n);
+      }
+      const nums = numbers;
+
+      let paquetes=0, ppp=0, sueltas=0, label="";
+      if(nums.length===1){
+        sueltas = nums[0]; label = "1 cantidad → sueltas";
+      } else if(nums.length===2){
+        paquetes = nums[0]; ppp = nums[1]; label = "2 cantidades → paquetes + piezas/paquete";
+      } else if(nums.length===3){
+        paquetes = nums[0]; ppp = nums[1]; sueltas = nums[2]; label = "3 cantidades → paquetes + piezas/paquete + sueltas";
+      } else if(nums.length>=4){
+        paquetes = nums[0]*nums[1]; ppp = nums[2]; sueltas = nums[3]; label = `4 cantidades → cajas anidadas (${nums[0]}×${nums[1]}=${paquetes} paquetes)`;
+      } else {
+        return { ok:false, raw:text, paquetes:0,ppp:0,sueltas:0, label:"No detecté cantidades" };
+      }
+      const total = (paquetes*ppp)+sueltas;
+      return { ok:true, raw:text, paquetes, ppp, sueltas, total, label };
+    }
+
+    /* ============================================================
+       AUTENTICACIÓN
+       ============================================================ */
+    async function login(codigo, pin){
+      codigo = codigo.trim().toUpperCase();
+      if(supabase && state.online){
+        const { data, error } = await supabase.from("usuarios").select("*").eq("id",codigo).eq("pin",pin).maybeSingle();
+        if(error) throw error;
+        if(data){ await db.usuarios.put({...data, synced:true}); return data; }
+      }
+      const local = await db.usuarios.get(codigo);
+      if(local && local.pin===pin) return { id:local.id, rol:local.rol||"sucursal", foto_url: local.foto_url||null };
+      return null;
+    }
+
+    async function seedUsuariosLocal(){
+      const count = await db.usuarios.count();
+      if(count===0){
+        await db.usuarios.bulkPut([
+          {id:"ADMIN", pin:"1234", rol:"admin", synced:false},
+          {id:"M1", pin:"1111", rol:"sucursal", foto_url:null, synced:false},
+          {id:"M2", pin:"2222", rol:"sucursal", foto_url:null, synced:false},
+          {id:"M3", pin:"3333", rol:"sucursal", foto_url:null, synced:false},
+          {id:"C1", pin:"4444", rol:"sucursal", foto_url:null, synced:false},
+          {id:"C2", pin:"5555", rol:"sucursal", foto_url:null, synced:false},
+          {id:"R1", pin:"6666", rol:"sucursal", foto_url:null, synced:false}
+        ]);
+      }
+    }
+
+    async function getUsuarios(){
+      if(supabase && state.online){
+        try{
+          const { data, error } = await supabase.from("usuarios").select("*");
+          if(!error && data){ await db.usuarios.bulkPut(data.map(u=>({...u, synced:true}))); return data; }
+        }catch(e){ console.warn(e); }
+      }
+      return db.usuarios.toArray();
+    }
+
+    /* ============================================================
+       IMAGEN: redimensionar a 96x96 WebP
+       ============================================================ */
+    async function procesyarImagen(file){
+      return new Promise((resolve,reject)=>{
+        const reader = new FileReader();
+        reader.onload = e => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement("canvas");
+            canvas.width = 96; canvas.height = 96;
+            const ctx = canvas.getContext("2d");
+            const ratio = Math.max(96/img.width, 96/img.height);
+            const w = img.width*ratio, h = img.height*ratio;
+            ctx.drawImage(img, (96-w)/2, (96-h)/2, w, h);
+            canvas.toBlob(b => resolve(b), "image/webp", 0.7);
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function subirImagen(blob, folder="productos"){
+      if(!supabase || !state.online) return null;
+      const path = `${folder}/${uid()}.webp`;
+      const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(path, blob, { contentType:"image/webp", upsert:false });
+      if(error) throw error;
+      const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+      return pub.publicUrl;
+    }
+
+    /* ============================================================
+       CRUD PRODUCTOS (offline-first)
+       ============================================================ */
+    async function getProductos(){
+      if(supabase && state.online){
+        try{
+          const { data, error } = await supabase.from("productos").select("*").order("creado_en",{ascending:false});
+          if(!error && data){
+            await db.productos.bulkPut(data.map(p=>({...p, synced:true})));
+            return data;
+          }
+        }catch(e){ console.warn(e); }
+      }
+      const locals = await db.productos.toArray();
+      return locals.sort((a,b)=> (b.creado_en||"").localeCompare(a.creado_en||""));
+    }
+
+    async function saveProducto(p){
+      if(p.paquetes>0 && p.piezas_por_paquete===0){
+        toast("Error: si hay paquetes, piezas_por_paquete no puede ser 0","err");
+        return null;
+      }
+      p.stock_total_bodega = (p.paquetes*p.piezas_por_paquete) + p.piezas_sueltas;
+      p.id = p.id || uid();
+      p.creado_en = p.creado_en || new Date().toISOString();
+      await db.productos.put({...p, synced:false});
+      if(supabase && state.online){
+        try{
+          const { data, error } = await supabase.from("productos").upsert(p).select().single();
+          if(!error){ await db.productos.put({...data, synced:true}); return data; }
+          else throw error;
+        }catch(e){ console.warn("Guardado local, pendiente sync:", e); }
+      }
+      return p;
+    }
+
+    /* ============================================================
+       ENVÍOS
+       ============================================================ */
+    async function getEnvios(){
+      if(supabase && state.online){
+        try{
+          const { data, error } = await supabase.from("envios").select("*, productos(*)").order("fecha_envio",{ascending:false});
+          if(!error && data){
+            await db.envios.bulkPut(data.map(e=>{ const {productos,...rest}=e; return {...rest, synced:true}; }));
+            return data;
+          }
+        }catch(e){ console.warn(e); }
+      }
+      const locals = await db.envios.toArray();
+      const prods = await db.productos.toArray();
+      return locals.sort((a,b)=> (b.fecha_envio||"").localeCompare(a.fecha_envio||"")).map(e=>({...e, productos: prods.find(p=>p.id===e.producto_id)}));
+    }
+
+    async function crearEnvio({producto_id, sucursal_destino, cantidad_enviada}){
+      const lote = generarLote();
+      const envio = {
+        id: uid(), producto_id, sucursal_destino, cantidad_enviada,
+        lote, estado: "EN_TRANSITO", fecha_envio: new Date().toISOString()
+      };
+      await db.envios.put({...envio, synced:false});
+      if(supabase && state.online){
+        try{
+          const { data, error } = await supabase.from("envios").insert(envio).select().single();
+          if(!error){ await db.envios.put({...data, synced:true}); return data; }
+          else throw error;
+        }catch(e){ console.warn(e); }
+      }
+      return envio;
+    }
+
+    function generarLote(){
+      const hoy = new Date();
+      const ymd = hoy.getFullYear()+String(hoy.getMonth()+1).padStart(2,"0")+String(hoy.getDate()).padStart(2,"0");
+      const seq = String(Math.floor(Math.random()*900)+100);
+      return `LOTE-${ymd}-${seq}`;
+    }
+
+    async function confirmarRecepcion(envio, piezasRecibidas, modo){
+      const prod = await db.productos.get(envio.producto_id);
+      let recibidas = 0;
+      if(modo==="completo") recibidas = prod ? (prod.piezas_por_paquete||0) : 0;
+      else recibidas = parseInt(piezasRecibidas,10)||0;
+
+      let inv = (await db.inventario_sucursal.where("producto_id").equals(envio.producto_id).toArray()).find(i=>i.sucursal_id===envio.sucursal_destino);
+      if(!inv){
+        inv = { id:uid(), producto_id:envio.producto_id, sucursal_id:envio.sucursal_destino, stock_actual:0, stock_umbral:0 };
+      }
+      inv.stock_actual = (inv.stock_actual||0) + recibidas;
+      await db.inventario_sucursal.put({...inv, synced:false});
+
+      let estado = "RECIBIDO_TOTAL";
+      if(recibidas===0) estado = "MERMA_PENDIENTE";
+      else if(recibidas < envio.cantidad_enviada) estado = "RECIBIDO_PARCIAL";
+      envio.estado = estado;
+      envio.fecha_recepcion = new Date().toISOString();
+      await db.envios.put({...envio, synced:false});
+
+      if(estado==="MERMA_PENDIENTE" || estado==="RECIBIDO_PARCIAL"){
+        const merma = { id:uid(), envio_id:envio.id, sucursal_id:envio.sucursal_destino, cantidad_reportada: envio.cantidad_enviada - recibidas, motivo: estado==="MERMA_PENDIENTE" ? "No llegó nada" : "Faltante parcial", aprobado:false };
+        await db.mermas_pendientes.put({...merma, synced:false});
+        if(supabase && state.online){
+          try{ await supabase.from("mermas_pendientes").insert(merma); await db.mermas_pendientes.put({...merma, synced:true}); }catch(e){ console.warn(e); }
+        }
+      }
+
+      if(supabase && state.online){
+        try{
+          await supabase.from("envios").update({ estado, fecha_recepcion: envio.fecha_recepcion }).eq("id", envio.id);
+          await supabase.from("inventario_sucursal").upsert(inv);
+          await db.envios.put({...envio, synced:true});
+          await db.inventario_sucursal.put({...inv, synced:true});
+        }catch(e){ console.warn(e); }
+      }
+      return estado;
+    }
+
+    /* ============================================================
+       INVENTARIO SUCURSAL
+       ============================================================ */
+    async function getInventarioSucursal(sid){
+      if(supabase && state.online){
+        try{
+          const { data, error } = await supabase.from("inventario_sucursal").select("*, productos(*)").eq("sucursal_id", sid);
+          if(!error && data){
+            await db.inventario_sucursal.bulkPut(data.map(i=>{ const {productos,...rest}=i; return {...rest, synced:true}; }));
+            return data;
+          }
+        }catch(e){ console.warn(e); }
+      }
+      const locals = await db.inventario_sucursal.where("sucursal_id").equals(sid).toArray();
+      const prods = await db.productos.toArray();
+      return locals.map(i=>({...i, productos: prods.find(p=>p.id===i.producto_id)}));
+    }
+
+    /* ============================================================
+       CONFIRMACIONES DE PRECIOS
+       ============================================================ */
+    async function confirmarLecturaPrecio(producto_id, sucursal_id, precio_visto){
+      const reg = { id:uid(), producto_id, sucursal_id, precio_visto, confirmado_en:new Date().toISOString() };
+      await db.confirmaciones_precios.put({...reg, synced:false});
+      if(supabase && state.online){
+        try{ await supabase.from("confirmaciones_precios").insert(reg); await db.confirmaciones_precios.put({...reg, synced:true}); }
+        catch(e){ console.warn(e); }
+      }
+      return reg;
+    }
+
+    async function getConfirmaciones(){
+      if(supabase && state.online){
+        try{
+          const { data, error } = await supabase.from("confirmaciones_precios").select("*");
+          if(!error && data){ await db.confirmaciones_precios.bulkPut(data.map(c=>({...c, synced:true}))); return data; }
+        }catch(e){ console.warn(e); }
+      }
+      return db.confirmaciones_precios.toArray();
+    }
+
+    /* ============================================================
+       MERMAS
+       ============================================================ */
+    async function getMermas(sucursal_id){
+      if(supabase && state.online){
+        try{
+          let q = supabase.from("mermas_pendientes").select("*, envios(*, productos(*))");
+          if(sucursal_id) q = q.eq("sucursal_id", sucursal_id);
+          const { data, error } = await q;
+          if(!error && data){ await db.mermas_pendientes.bulkPut(data.map(m=>{ const {envios,...rest}=m; return {...rest, synced:true}; })); return data; }
+        }catch(e){ console.warn(e); }
+      }
+      const locals = sucursal_id ? await db.mermas_pendientes.where("sucursal_id").equals(sucursal_id).toArray() : await db.mermas_pendientes.toArray();
+      const envios = await db.envios.toArray();
+      const prods = await db.productos.toArray();
+      return locals.map(m=>{
+        const env = envios.find(e=>e.id===m.envio_id);
+        return {...m, envios:{...env, productos: prods.find(p=>p.id===env?.producto_id)}};
+      });
+    }
+
+    async function aprobarMerma(id, aprobar){
+      const m = await db.mermas_pendientes.get(id);
+      if(!m) return;
+      m.aprobado = aprobar;
+      await db.mermas_pendientes.put({...m, synced:false});
+      if(supabase && state.online){
+        try{ await supabase.from("mermas_pendientes").update({ aprobado: aprobar }).eq("id", id); await db.mermas_pendientes.put({...m, synced:true}); }
+        catch(e){ console.warn(e); }
+      }
+    }
+
+    /* ============================================================
+       SINCRONIZACIÓN
+       ============================================================ */
+    async function sincronizar(){
+      if(!supabase){ toast("Supabase no configurado","err"); return; }
+      if(!state.online){ toast("Sin conexión: pendiente de sincronizar","warn"); return; }
+      try{
+        const tables = ["productos","envios","inventario_sucursal","confirmaciones_precios","mermas_pendientes","usuarios"];
+        for(const t of tables){
+          const all = await db[t].toArray();
+          const pend = all.filter(r=>r.synced===false || r.synced===0);
+          for(const r of pend){
+            const { synced, ...row } = r;
+            try{
+              await supabase.from(t).upsert(row);
+              await db[t].put({...r, synced:true});
+            }catch(e){ console.warn("sync row fail", t, e); }
+          }
+        }
+        const { data: prods } = await supabase.from("productos").select("*");
+        if(prods) await db.productos.bulkPut(prods.map(p=>({...p, synced:true})));
+        const { data: envs } = await supabase.from("envios").select("*");
+        if(envs) await db.envios.bulkPut(envs.map(e=>({...e, synced:true})));
+        const { data: invs } = await supabase.from("inventario_sucursal").select("*");
+        if(invs) await db.inventario_sucursal.bulkPut(invs.map(i=>({...i, synced:true})));
+        const { data: confs } = await supabase.from("confirmaciones_precios").select("*");
+        if(confs) await db.confirmaciones_precios.bulkPut(confs.map(c=>({...c, synced:true})));
+        const { data: merm } = await supabase.from("mermas_pendientes").select("*");
+        if(merm) await db.mermas_pendientes.bulkPut(merm.map(m=>({...m, synced:true})));
+
+        state.lastSync = new Date().toISOString();
+        toast("Sincronización completada","ok");
+        render();
+      }catch(e){
+        console.error(e);
+        toast("Error al sincronizar: "+e.message,"err");
+      }
+    }
+
+    /* ============================================================
+       REALTIME — Notificaciones de precios
+       ============================================================ */
+    let realtimeChannel = null;
+    function startRealtime(){
+      if(!supabase || realtimeChannel) return;
+      realtimeChannel = supabase.channel("productos-changes")
+        .on("postgres_changes", { event:"UPDATE", schema:"public", table:"productos" }, payload => {
+          const oldP = payload.old || {};
+          const newP = payload.new || {};
+          if(newP.precio_base!==oldP.precio_base || newP.oferta_activa!==oldP.oferta_activa){
+            if(state.user && state.user.rol==="admin") return;
+            state.priceNotifs.push({ producto: newP, old: oldP });
+            renderPriceNotif();
+          }
+        })
+        .subscribe();
+    }
+
+    function renderPriceNotif(){
+      const existing = $("#price-notif-overlay");
+      if(existing) existing.remove();
+      const n = state.priceNotifs[0];
+      if(!n) return;
+      const p = n.producto;
+      const antes = n.old.precio_base;
+      const ahora = p.oferta_activa ? p.precio_oferta : p.precio_base;
+      const tipo = p.oferta_activa ? "OFERTA" : "NUEVO PRECIO";
+      const overlay = el("div",{id:"price-notif-overlay",class:"fixed inset-0 z-[90] bg-black/50 flex items-center justify-center p-4 fade-in"});
+      const card = el("div",{class:"bg-white rounded-2xl p-5 w-full max-w-sm shadow-2xl slide-up"});
+      card.innerHTML = `
+        <div class="flex items-center gap-2 mb-3">
+          <span class="text-2xl">🔔</span>
+          <span class="font-bold text-slate-900">${tipo}</span>
+        </div>
+        <p class="text-lg font-semibold text-slate-800 mb-1">${escapeHtml(p.nombre)}</p>
+        ${antes!=null && antes!==ahora ? `<p class="text-sm text-slate-500 mb-1">Antes: <span class="line-through">${fmtMoney(antes)}</span></p>`:""}
+        <p class="text-2xl font-bold ${p.oferta_activa?'text-orange-600':'text-emerald-600'} mb-4">Ahora: ${fmtMoney(ahora)}</p>
+        <div class="flex gap-2">
+          <button id="btnConfirmLect" class="flex-1 bg-emerald-600 text-white py-3 rounded-xl font-semibold">Confirmar Lectura</button>
+          <button id="btnVerDespues" class="flex-1 bg-slate-200 text-slate-700 py-3 rounded-xl font-semibold">Ver después</button>
+        </div>`;
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      $("#btnConfirmLect").onclick = async () => {
+        await confirmarLecturaPrecio(p.id, state.user.id, ahora);
+        state.priceNotifs.shift();
+        toast("Lectura confirmada","ok");
+        renderPriceNotif();
+      };
+      $("#btnVerDespues").onclick = () => { state.priceNotifs.shift(); renderPriceNotif(); };
+    }
+
+    /* ============================================================
+       RENDER PRINCIPAL
+       ============================================================ */
+    function render(){
+      const app = $("#app");
+      app.innerHTML = "";
+      if(state.view==="login"){ app.appendChild(renderLogin()); return; }
+      app.appendChild(renderHeader());
+      const main = el("main",{class:"pb-20 min-h-[calc(100vh-56px)] max-w-md mx-auto px-4 py-3"});
+      if(state.user.rol==="admin"){
+        if(state.view==="bodega") main.appendChild(renderBodega());
+        else if(state.view==="envios") main.appendChild(renderEnvios());
+        else if(state.view==="reportes") main.appendChild(renderReportes());
+        else if(state.view==="config") main.appendChild(renderConfig());
+      } else {
+        if(state.view==="recibir") main.appendChild(renderRecibir());
+        else if(state.view==="consultar") main.appendChild(renderConsultar());
+        else if(state.view==="mermas") main.appendChild(renderMermas());
+      }
+      app.appendChild(main);
+      app.appendChild(renderBottomNav());
+    }
+
+    /* ---------- Header ---------- */
+    function renderHeader(){
+      const header = el("header",{class:"bg-brand-900 text-white sticky top-0 z-40 shadow"});
+      const inner = el("div",{class:"max-w-md mx-auto px-4 py-3 flex items-center justify-between"});
+      const left = el("div",{class:"flex items-center gap-2"});
+      left.appendChild(el("span",{class:"text-lg font-bold"},"📦 BodegaExpress"));
+      if(state.user.foto_url){
+        left.appendChild(el("img",{src:state.user.foto_url, class:"w-6 h-6 rounded-full object-cover border border-white/40"}));
+      }
+      left.appendChild(el("span",{class:"text-xs px-2 py-0.5 rounded-full "+(state.user.rol==="admin"?"bg-amber-500":"bg-brand-500")}, state.user.id));
+      const right = el("div",{class:"flex flex-col items-end gap-1"});
+      const status = el("div",{class:"flex items-center gap-1.5 text-xs"});
+      const dot = el("span",{class:"w-2 h-2 rounded-full "+(state.online?"bg-emerald-400":"bg-red-400")});
+      const txt = state.online ? `Conectado · ${state.lastSync?("sync "+timeAgo(state.lastSync)):"sin sync"}` : "Sin conexión (local)";
+      status.appendChild(dot); status.appendChild(el("span",{}, txt));
+      const syncBtn = el("button",{class:"text-xs bg-white/15 hover:bg-white/25 px-3 py-1 rounded-lg font-medium", onclick: sincronizar}, state.online?"↻ Sincronizar":"Pendiente sync");
+      right.appendChild(status); right.appendChild(syncBtn);
+      inner.appendChild(left); inner.appendChild(right);
+      header.appendChild(inner);
+      return header;
+    }
+
+    /* ---------- Bottom Nav ---------- */
+    function renderBottomNav(){
+      const nav = el("nav",{class:"fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg z-40"});
+      const wrap = el("div",{class:"max-w-md mx-auto grid "+(state.user.rol==="admin"?"grid-cols-4":"grid-cols-3")});
+      let tabs;
+      if(state.user.rol==="admin"){
+        tabs = [["bodega","Bodega","📦"],["envios","Envíos","🚚"],["reportes","Reportes","📊"],["config","Config","⚙️"]];
+      } else {
+        tabs = [["recibir","Recibir","📥"],["consultar","Consultar","🔍"],["mermas","Mermas","⚠️"]];
+      }
+      tabs.forEach(([v,label,icon])=>{
+        const active = state.view===v;
+        const btn = el("button",{class:"flex flex-col items-center py-2.5 "+(active?"text-brand-600":"text-slate-400"), onclick:()=>{state.view=v; render();}},
+          el("span",{class:"text-xl leading-none"},icon),
+          el("span",{class:"text-[11px] mt-0.5 font-medium"},label)
+        );
+        wrap.appendChild(btn);
+      });
+      nav.appendChild(wrap);
+      return nav;
+    }
+
+    /* ============================================================
+       LOGIN
+       ============================================================ */
+    function renderLogin(){
+      const wrap = el("div",{class:"min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-brand-900 to-brand-700 px-6"});
+      const card = el("div",{class:"bg-white rounded-3xl p-7 w-full max-w-sm shadow-2xl fade-in"});
+      card.innerHTML = `
+        <div class="text-center mb-6">
+          <div class="text-5xl mb-2">📦</div>
+          <h1 class="text-2xl font-extrabold text-slate-900">BodegaExpress</h1>
+          <p class="text-sm text-slate-500">Logística interna</p>
+        </div>
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Código de usuario</label>
+            <input id="li-codigo" type="text" autocomplete="off" placeholder="ADMIN / S1..." class="w-full mt-1 px-4 py-3 rounded-xl border border-slate-300 focus:border-brand-500 focus:ring-2 focus:ring-brand-200 outline-none uppercase" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-600">PIN (4 dígitos)</label>
+            <input id="li-pin" type="password" inputmode="numeric" maxlength="4" placeholder="••••" class="w-full mt-1 px-4 py-3 rounded-xl border border-slate-300 focus:border-brand-500 focus:ring-2 focus:ring-brand-200 outline-none tracking-widest text-center text-lg" />
+          </div>
+          <button id="li-btn" class="w-full bg-brand-600 hover:bg-brand-700 text-white py-3.5 rounded-xl font-bold text-lg shadow-lg active:scale-95 transition">Entrar</button>
+          <p class="text-xs text-center text-slate-400 mt-2">Demo: ADMIN/1234 · M1/1111</p>
+        </div>`;
+      wrap.appendChild(card);
+      setTimeout(()=>{
+        $("#li-btn").onclick = async () => {
+          const codigo = $("#li-codigo").value;
+          const pin = $("#li-pin").value;
+          if(!codigo||!pin){ toast("Ingresa código y PIN","err"); return; }
+          try{
+            const u = await login(codigo, pin);
+            if(u){
+              state.user = { id:u.id, rol:u.rol||"sucursal", foto_url: u.foto_url||null };
+              state.view = u.rol==="admin" ? "bodega" : "recibir";
+              startRealtime();
+              render();
+              toast("Bienvenido "+u.id,"ok");
+            } else {
+              toast("Credenciales incorrectas","err");
+            }
+          }catch(e){ toast("Error: "+e.message,"err"); }
+        };
+        $("#li-pin").addEventListener("keydown", e=>{ if(e.key==="Enter") $("#li-btn").click(); });
+      },0);
+      return wrap;
+    }
+
+    /* ============================================================
+       ADMIN — BODEGA (alta de producto + dictado)
+       ============================================================ */
+    function renderBodega(){
+      const wrap = el("div",{class:"space-y-4 fade-in"});
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Alta de Producto</h2>`;
+
+      const card = el("div",{class:"bg-white rounded-2xl p-4 shadow-sm space-y-3"});
+      card.innerHTML = `
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Foto del producto</label>
+          <div class="flex items-center gap-3 mt-1">
+            <div id="foto-preview" class="w-16 h-16 rounded-xl bg-slate-100 flex items-center justify-center text-2xl border border-dashed border-slate-300">📷</div>
+            <label class="flex-1 cursor-pointer bg-slate-100 hover:bg-slate-200 rounded-xl py-3 text-center text-sm font-medium text-slate-600">
+              Tomar / elegir foto
+              <input id="foto-input" type="file" accept="image/*" capture="environment" class="hidden" />
+            </label>
+          </div>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Código</label>
+          <input id="p-codigo" type="text" placeholder="Ej. PROD-001" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:border-brand-500" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Nombre</label>
+          <input id="p-nombre" type="text" placeholder="Nombre del producto" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:border-brand-500" />
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Paquetes</label>
+            <input id="p-paquetes" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Piezas/paquete</label>
+            <input id="p-ppp" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Sueltas</label>
+            <input id="p-sueltas" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
+          </div>
+        </div>
+        <div id="p-total" class="text-sm font-semibold text-slate-700 bg-slate-50 rounded-lg px-3 py-2">Stock total bodega: 0</div>
+        <div id="p-validacion" class="hidden text-sm text-red-600 font-medium"></div>
+
+        <button id="btn-dictar" class="w-full bg-brand-600 hover:bg-brand-700 text-white py-5 rounded-2xl font-bold text-lg shadow-md active:scale-95 transition flex items-center justify-center gap-2">
+          <span class="text-3xl">🎤</span> Dictar cantidades
+        </button>
+        <div id="dictar-status" class="hidden text-center text-sm font-medium text-brand-600 animate-pulse">🎙️ Escuchando...</div>
+        <div id="dictar-preview" class="hidden bg-brand-50 border border-brand-200 rounded-xl p-3 text-sm text-slate-700"></div>
+
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Precio base</label>
+            <input id="p-precio" type="number" step="any" placeholder="0" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Precio oferta</label>
+            <input id="p-oferta" type="number" step="any" placeholder="0" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none" />
+          </div>
+        </div>
+        <label class="flex items-center gap-2 text-sm font-medium text-slate-700">
+          <input id="p-oferta-activa" type="checkbox" class="w-5 h-5 accent-orange-500" /> Oferta activa
+        </label>
+        <button id="btn-guardar" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3.5 rounded-xl font-bold shadow active:scale-95 transition">Guardar producto</button>
+      `;
+      wrap.appendChild(card);
+
+      wrap.appendChild(el("h3",{class:"text-lg font-bold text-slate-800 mt-4"},"Productos registrados"));
+      const list = el("div",{id:"prod-list",class:"space-y-2"});
+      wrap.appendChild(list);
+
+      let fotoBlob = null;
+
+      (async()=>{
+        const prods = await getProductos();
+        list.innerHTML = prods.length ? prods.map(p=>`
+          <div class="bg-white rounded-xl p-3 shadow-sm flex items-center gap-3">
+            ${p.foto_url?`<img src="${p.foto_url}" class="w-12 h-12 rounded-lg object-cover" />`:`<div class="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center text-xl">📦</div>`}
+            <div class="flex-1 min-w-0">
+              <p class="font-semibold text-sm truncate">${escapeHtml(p.nombre)}</p>
+              <p class="text-xs text-slate-500">${escapeHtml(p.codigo)} · Stock: ${p.stock_total_bodega||0}</p>
+            </div>
+            <div class="text-right">
+              ${p.oferta_activa&&p.precio_oferta?`<p class="text-sm font-bold text-orange-600">${fmtMoney(p.precio_oferta)}</p><p class="text-xs line-through text-slate-400">${fmtMoney(p.precio_base)}</p>`:`<p class="text-sm font-bold text-emerald-600">${fmtMoney(p.precio_base)}</p>`}
+            </div>
+          </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-4">Sin productos aún</p>`;
+      })();
+
+      setTimeout(()=>{
+        const calcTotal = () => {
+          const paq = parseInt($("#p-paquetes").value,10)||0;
+          const ppp = parseInt($("#p-ppp").value,10)||0;
+          const sue = parseInt($("#p-sueltas").value,10)||0;
+          const total = paq*ppp+sue;
+          $("#p-total").textContent = "Stock total bodega: "+total;
+          const v = $("#p-validacion");
+          if(paq>0 && ppp===0){ v.textContent="⚠️ Si hay paquetes, piezas/paquete no puede ser 0"; v.classList.remove("hidden"); }
+          else v.classList.add("hidden");
+        };
+        ["#p-paquetes","#p-ppp","#p-sueltas"].forEach(s=>$(s).addEventListener("input",calcTotal));
+
+        $("#foto-input").onchange = async (e) => {
+          const file = e.target.files[0];
+          if(!file) return;
+          fotoBlob = await procesyarImagen(file);
+          const url = URL.createObjectURL(fotoBlob);
+          $("#foto-preview").innerHTML = `<img src="${url}" class="w-16 h-16 rounded-xl object-cover" />`;
+        };
+
+        // DICTADO POR VOZ
+        let recognition = null;
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        $("#btn-dictar").onclick = () => {
+          if(!SR){ toast("Tu navegador no soporta dictado por voz","err"); return; }
+          if(recognition){ recognition.stop(); return; }
+          recognition = new SR();
+          recognition.lang = "es-ES";
+          recognition.interimResults = false;
+          recognition.maxAlternatives = 1;
+          $("#dictar-status").classList.remove("hidden");
+          $("#dictar-preview").classList.add("hidden");
+          recognition.onresult = (ev) => {
+            const texto = ev.results[0][0].transcript;
+            const r = parseVoice(texto);
+            $("#dictar-status").classList.add("hidden");
+            const prev = $("#dictar-preview");
+            prev.classList.remove("hidden");
+            if(r.ok){
+              $("#p-paquetes").value = r.paquetes;
+              $("#p-ppp").value = r.ppp;
+              $("#p-sueltas").value = r.sueltas;
+              prev.innerHTML = `✅ <b>Interpreté:</b> ${r.paquetes} paquetes de ${r.ppp} piezas + ${r.sueltas} sueltas = <b>${r.total}</b><br><span class="text-xs text-slate-500">"${escapeHtml(texto)}" (${r.label})</span>`;
+              calcTotal();
+            } else {
+              prev.innerHTML = `⚠️ No entendí. Texto: "${escapeHtml(texto)}". Edita los campos manualmente.`;
+            }
+          };
+          recognition.onerror = (e) => { $("#dictar-status").classList.add("hidden"); toast("Error de voz: "+e.error,"err"); recognition=null; };
+          recognition.onend = () => { $("#dictar-status").classList.add("hidden"); recognition=null; };
+          recognition.start();
+        };
+
+        $("#btn-guardar").onclick = async () => {
+          const codigo = $("#p-codigo").value.trim();
+          const nombre = $("#p-nombre").value.trim();
+          if(!codigo||!nombre){ toast("Código y nombre son obligatorios","err"); return; }
+          const paq = parseInt($("#p-paquetes").value,10)||0;
+          const ppp = parseInt($("#p-ppp").value,10)||0;
+          const sue = parseInt($("#p-sueltas").value,10)||0;
+          if(paq>0 && ppp===0){ toast("Paquetes requiere piezas/paquete > 0","err"); return; }
+          let fUrl = null;
+          if(fotoBlob){ try{ fUrl = await subirImagen(fotoBlob); }catch(e){ toast("No se subió la foto (¿sin conexión?)","warn"); } }
+          const prod = {
+            id: uid(), codigo, nombre, foto_url: fUrl,
+            paquetes: paq, piezas_por_paquete: ppp, piezas_sueltas: sue,
+            stock_total_bodega: paq*ppp+sue,
+            precio_base: parseFloat($("#p-precio").value)||null,
+            precio_oferta: parseFloat($("#p-oferta").value)||null,
+            oferta_activa: $("#p-oferta-activa").checked,
+            creado_en: new Date().toISOString()
+          };
+          await saveProducto(prod);
+          toast("Producto guardado","ok");
+          render();
+        };
+      },0);
+
+      return wrap;
+    }
+
+    /* ============================================================
+       ADMIN — ENVÍOS
+       ============================================================ */
+    function renderEnvios(){
+      const wrap = el("div",{class:"space-y-4 fade-in"});
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Asignar Envío a Sucursal</h2>`;
+      const card = el("div",{class:"bg-white rounded-2xl p-4 shadow-sm space-y-3"});
+      card.innerHTML = `
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Producto</label>
+          <select id="e-producto" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none"></select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Sucursal destino</label>
+          <select id="e-sucursal" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none"></select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Cantidad enviada (piezas)</label>
+          <input id="e-cantidad" type="number" placeholder="0" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none" />
+        </div>
+        <div id="e-lote" class="text-xs text-slate-500">Lote se generará automáticamente al guardar</div>
+        <button id="e-enviar" class="w-full bg-brand-600 hover:bg-brand-700 text-white py-3.5 rounded-xl font-bold active:scale-95 transition">Crear envío</button>
+      `;
+      wrap.appendChild(card);
+
+      wrap.appendChild(el("h3",{class:"text-lg font-bold text-slate-800 mt-4"},"Envíos recientes"));
+      const list = el("div",{id:"env-list",class:"space-y-2"});
+      wrap.appendChild(list);
+
+      (async()=>{
+        const prods = await getProductos();
+        const sel = $("#e-producto");
+        sel.innerHTML = prods.length ? prods.map(p=>`<option value="${p.id}">${escapeHtml(p.nombre)} (${escapeHtml(p.codigo)})</option>`).join("") : `<option disabled>Sin productos</option>`;
+        const users = (await getUsuarios()).filter(u=>u.rol!=="admin");
+        $("#e-sucursal").innerHTML = users.map(u=>`<option value="${u.id}">${u.id}</option>`).join("");
+        const envs = await getEnvios();
+        list.innerHTML = envs.length ? envs.slice(0,20).map(e=>`
+          <div class="bg-white rounded-xl p-3 shadow-sm">
+            <div class="flex justify-between items-start">
+              <div>
+                <p class="font-semibold text-sm">${escapeHtml(e.productos?.nombre||"Producto")}</p>
+                <p class="text-xs text-slate-500">→ ${e.sucursal_destino} · ${e.cantidad_enviada} pzs</p>
+              </div>
+              <span class="text-[10px] font-mono bg-slate-100 px-2 py-1 rounded">${escapeHtml(e.lote||"-")}</span>
+            </div>
+            <div class="flex justify-between mt-2">
+              <span class="text-xs text-slate-400">${fmtDate(e.fecha_envio)}</span>
+              <span class="text-xs font-semibold ${e.estado==='RECIBIDO_TOTAL'?'text-emerald-600':e.estado==='RECIBIDO_PARCIAL'?'text-amber-600':e.estado==='MERMA_PENDIENTE'?'text-red-600':'text-brand-600'}">${e.estado||"EN_TRANSITO"}</span>
+            </div>
+          </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-4">Sin envíos</p>`;
+      })();
+
+      setTimeout(()=>{
+        $("#e-enviar").onclick = async () => {
+          const pid = $("#e-producto").value;
+          const suc = $("#e-sucursal").value;
+          const cant = parseInt($("#e-cantidad").value,10);
+          if(!pid||!suc||!cant||cant<=0){ toast("Completa todos los campos","err"); return; }
+          const env = await crearEnvio({producto_id:pid, sucursal_destino:suc, cantidad_enviada:cant});
+          toast("Envío creado: "+env.lote,"ok");
+          render();
+        };
+      },0);
+      return wrap;
+    }
+
+    /* ============================================================
+       ADMIN — REPORTES
+       ============================================================ */
+    function renderReportes(){
+      const wrap = el("div",{class:"space-y-4 fade-in"});
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Reportes</h2>`;
+      const tabs = el("div",{class:"flex gap-2 overflow-x-auto no-scrollbar"});
+      ["stock","vacio","mermas","lecturas"].forEach((t)=>{
+        const btn = el("button",{class:"px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap "+(state.rtab===t?"bg-brand-600 text-white":"bg-white text-slate-600 shadow-sm"), onclick:()=>{state.rtab=t; render();}}, 
+          t==="stock"?"Stock general":t==="vacio"?"Stock vacío":t==="mermas"?"Mermas por aprobar":"Lecturas de precios");
+        tabs.appendChild(btn);
+      });
+      wrap.appendChild(tabs);
+      const body = el("div",{id:"rep-body",class:"mt-3"});
+      wrap.appendChild(body);
+
+      (async()=>{
+        const tab = state.rtab||"stock";
+        if(tab==="stock"){
+          const prods = await getProductos();
+          body.innerHTML = `<div class="space-y-2">${prods.map(p=>`
+            <div class="bg-white rounded-xl p-3 shadow-sm flex justify-between">
+              <div><p class="font-semibold text-sm">${escapeHtml(p.nombre)}</p><p class="text-xs text-slate-500">${escapeHtml(p.codigo)}</p></div>
+              <p class="font-bold text-lg ${p.stock_total_bodega<=0?'text-red-600':'text-emerald-600'}">${p.stock_total_bodega||0}</p>
+            </div>`).join("")||"<p class='text-sm text-slate-400'>Sin datos</p>"}</div>`;
+        }
+        else if(tab==="vacio"){
+          let allInv = [];
+          if(supabase && state.online){ const {data}=await supabase.from("inventario_sucursal").select("*, productos(*)"); if(data) allInv=data; }
+          else allInv = await db.inventario_sucursal.toArray();
+          const prods = await db.productos.toArray();
+          allInv = allInv.map(i=>({...i, productos: i.productos||prods.find(p=>p.id===i.producto_id)}));
+          const vacios = allInv.filter(i=>(i.stock_actual||0) <= (i.stock_umbral||0));
+          body.innerHTML = `<div class="space-y-2">${vacios.length?vacios.map(i=>`
+            <div class="bg-white rounded-xl p-3 shadow-sm flex justify-between border-l-4 border-red-500">
+              <div><p class="font-semibold text-sm">${escapeHtml(i.productos?.nombre||"Producto")}</p><p class="text-xs text-slate-500">${i.sucursal_id} · umbral ${i.stock_umbral||0}</p></div>
+              <p class="font-bold text-red-600">${i.stock_actual||0}</p>
+            </div>`).join(""):"<p class='text-sm text-slate-400 text-center py-4'>No hay stock vacío 🎉</p>"}</div>`;
+        }
+        else if(tab==="mermas"){
+          const mermas = await getMermas(null);
+          body.innerHTML = `<div class="space-y-2">${mermas.length?mermas.map(m=>`
+            <div class="bg-white rounded-xl p-3 shadow-sm">
+              <div class="flex justify-between">
+                <div><p class="font-semibold text-sm">${escapeHtml(m.envios?.productos?.nombre||"Producto")}</p><p class="text-xs text-slate-500">${m.sucursal_id} · ${m.cantidad_reportada} pzs · ${escapeHtml(m.motivo||"")}</p></div>
+                <span class="text-xs font-semibold ${m.aprobado?'text-emerald-600':'text-amber-600'}">${m.aprobado?"Aprobado":"Pendiente"}</span>
+              </div>
+              ${!m.aprobado?`<div class="flex gap-2 mt-2"><button data-id="${m.id}" class="apr flex-1 bg-emerald-600 text-white py-2 rounded-lg text-sm font-semibold">Aprobar</button><button data-id="${m.id}" class="rec flex-1 bg-red-600 text-white py-2 rounded-lg text-sm font-semibold">Rechazar</button></div>`:""}
+            </div>`).join(""):"<p class='text-sm text-slate-400 text-center py-4'>Sin mermas</p>"}</div>`;
+          setTimeout(()=>{
+            body.querySelectorAll(".apr").forEach(b=>b.onclick=async()=>{ await aprobarMerma(b.dataset.id,true); toast("Merma aprobada","ok"); render(); });
+            body.querySelectorAll(".rec").forEach(b=>b.onclick=async()=>{ await aprobarMerma(b.dataset.id,false); toast("Merma rechazada","ok"); render(); });
+          },0);
+        }
+        else if(tab==="lecturas"){
+          const confs = await getConfirmaciones();
+          const prods = await getProductos();
+          const users = (await getUsuarios()).filter(u=>u.rol!=="admin");
+          const byProd = {};
+          confs.forEach(c=>{ (byProd[c.producto_id]=byProd[c.producto_id]||[]).push(c); });
+          body.innerHTML = `<div class="space-y-3">${prods.map(p=>{
+            const confsP = byProd[p.id]||[];
+            const estados = users.map(s=>{
+              const c = confsP.filter(x=>x.sucursal_id===s).sort((a,b)=>new Date(b.confirmado_en)-new Date(a.confirmado_en))[0];
+              return c ? `<span class="text-emerald-600">✓ ${s} (${timeAgo(c.confirmado_en)})</span>` : `<span class="text-amber-600">○ ${s} Pendiente</span>`;
+            }).join(" · ");
+            return `<div class="bg-white rounded-xl p-3 shadow-sm"><p class="font-semibold text-sm mb-1">${escapeHtml(p.nombre)}</p><p class="text-xs">${estados}</p></div>`;
+          }).join("")||"<p class='text-sm text-slate-400'>Sin productos</p>"}</div>`;
+        }
+      })();
+      return wrap;
+    }
+
+    /* ============================================================
+       ADMIN — CONFIG
+       ============================================================ */
+    function renderConfig(){
+      const wrap = el("div",{class:"space-y-4 fade-in"});
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Configuración · Usuarios</h2>`;
+
+      const list = el("div",{id:"user-list",class:"space-y-2"});
+      wrap.appendChild(list);
+
+      const editCard = el("div",{id:"edit-user", class:"hidden bg-white rounded-2xl p-4 shadow-sm space-y-3"});
+      wrap.appendChild(editCard);
+
+      // Formulario agregar usuario
+      const card = el("div",{class:"bg-white rounded-2xl p-4 shadow-sm space-y-3"});
+      card.innerHTML = `
+        <h3 class="font-bold text-slate-800">Agregar usuario</h3>
+        <div class="flex items-center gap-3">
+          <div id="nu-foto" class="w-14 h-14 rounded-full bg-slate-100 flex items-center justify-center text-2xl border border-dashed border-slate-300 overflow-hidden">📷</div>
+          <label class="cursor-pointer bg-slate-100 hover:bg-slate-200 rounded-xl px-3 py-2 text-sm font-medium text-slate-600">
+            Ícono / foto
+            <input id="nu-foto-input" type="file" accept="image/*" capture="environment" class="hidden" />
+          </label>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Código</label>
+            <input id="nu-id" type="text" placeholder="Ej. M4" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none uppercase" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-600">PIN (4 dígitos)</label>
+            <input id="nu-pin" type="text" maxlength="4" inputmode="numeric" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
+          </div>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-600">Rol</label>
+          <select id="nu-rol" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none">
+            <option value="sucursal">Sucursal</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <button id="nu-save" class="w-full bg-brand-600 text-white py-3 rounded-xl font-bold">Agregar usuario</button>`;
+      wrap.appendChild(card);
+
+      async function renderUserList(){
+        const users = await getUsuarios();
+        list.innerHTML = users.length ? users.map(u=>`
+          <div class="bg-white rounded-xl p-3 shadow-sm flex items-center gap-3">
+            ${u.foto_url?`<img src="${u.foto_url}" class="w-11 h-11 rounded-full object-cover" />`:`<div class="w-11 h-11 rounded-full bg-slate-100 flex items-center justify-center font-bold text-slate-400">${escapeHtml(u.id.slice(0,1))}</div>`}
+            <div class="flex-1">
+              <p class="font-semibold text-sm">${escapeHtml(u.id)}</p>
+              <p class="text-xs text-slate-500">${u.rol==="admin"?"Administrador":"Sucursal"}</p>
+            </div>
+            <button data-id="${u.id}" class="edit-user text-brand-600 text-sm font-semibold">Editar</button>
+          </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-4">Sin usuarios</p>`;
+        setTimeout(()=>{
+          list.querySelectorAll(".edit-user").forEach(b=>b.onclick=()=>openEdit(b.dataset.id));
+        },0);
+      }
+      renderUserList();
+
+      async function openEdit(id){
+        const u = await db.usuarios.get(id);
+        if(!u){ toast("Usuario no encontrado","err"); return; }
+        editCard.classList.remove("hidden");
+        let editFotoBlob = null;
+        editCard.innerHTML = `
+          <h3 class="font-bold text-slate-800">Editar: ${escapeHtml(u.id)}</h3>
+          <div class="flex items-center gap-3">
+            <div id="eu-foto" class="w-14 h-14 rounded-full bg-slate-100 flex items-center justify-center text-2xl border border-dashed border-slate-300 overflow-hidden">${u.foto_url?`<img src="${u.foto_url}" class="w-14 h-14 rounded-full object-cover" />`:"📷"}</div>
+            <label class="cursor-pointer bg-slate-100 hover:bg-slate-200 rounded-xl px-3 py-2 text-sm font-medium text-slate-600">
+              Cambiar ícono / foto
+              <input id="eu-foto-input" type="file" accept="image/*" capture="environment" class="hidden" />
+            </label>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-600">Nuevo PIN (opcional)</label>
+            <input id="eu-pin" type="text" maxlength="4" inputmode="numeric" placeholder="••••" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
+          </div>
+          <button id="eu-save" class="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold">Guardar cambios</button>
+          ${u.id!==state.user.id?`<button id="eu-del" class="w-full bg-red-50 text-red-600 py-2.5 rounded-xl font-semibold text-sm border border-red-200">Eliminar usuario</button>`:""}
+          <button id="eu-cancel" class="w-full text-slate-500 py-2 text-sm">Cerrar</button>`;
+        setTimeout(()=>{
+          $("#eu-foto-input").onchange = async (e)=>{
+            const f = e.target.files[0]; if(!f) return;
+            editFotoBlob = await procesyarImagen(f);
+            $("#eu-foto").innerHTML = `<img src="${URL.createObjectURL(editFotoBlob)}" class="w-14 h-14 rounded-full object-cover" />`;
+          };
+          $("#eu-save").onclick = async ()=>{
+            const pin = $("#eu-pin").value;
+            const changes = {...u};
+            if(pin){ if(!/^\d{4}$/.test(pin)){ toast("PIN debe ser 4 dígitos","err"); return; } changes.pin = pin; }
+            if(editFotoBlob){
+              try{ const url = await subirImagen(editFotoBlob,"usuarios"); if(url) changes.foto_url = url; }
+              catch(e){ toast("No se subió la foto","warn"); }
+            }
+            changes.synced = false;
+            await db.usuarios.put(changes);
+            if(supabase && state.online){ try{ await supabase.from("usuarios").upsert({id:u.id, pin:changes.pin, rol:changes.rol, foto_url:changes.foto_url}); await db.usuarios.put({...changes, synced:true}); }catch(e){ console.warn(e); } }
+            toast("Usuario actualizado","ok");
+            editCard.classList.add("hidden");
+            renderUserList();
+          };
+          const del = $("#eu-del");
+          if(del) del.onclick = async ()=>{
+            await db.usuarios.delete(u.id);
+            if(supabase && state.online){ try{ await supabase.from("usuarios").delete().eq("id",u.id); }catch(e){ console.warn(e); } }
+            toast("Usuario eliminado","ok");
+            editCard.classList.add("hidden");
+            renderUserList();
+          };
+          $("#eu-cancel").onclick = ()=>editCard.classList.add("hidden");
+        },0);
+      }
+
+      let newFotoBlob = null;
+      setTimeout(()=>{
+        $("#nu-foto-input").onchange = async (e)=>{
+          const f = e.target.files[0]; if(!f) return;
+          newFotoBlob = await procesyarImagen(f);
+          $("#nu-foto").innerHTML = `<img src="${URL.createObjectURL(newFotoBlob)}" class="w-14 h-14 rounded-full object-cover" />`;
+        };
+        $("#nu-save").onclick = async ()=>{
+          const id = $("#nu-id").value.trim().toUpperCase();
+          const pin = $("#nu-pin").value.trim();
+          const rol = $("#nu-rol").value;
+          if(!id){ toast("Ingresa un código","err"); return; }
+          if(!/^\d{4}$/.test(pin)){ toast("PIN debe ser 4 dígitos","err"); return; }
+          const exists = await db.usuarios.get(id);
+          if(exists){ toast("Ese código ya existe","err"); return; }
+          let fUrl = null;
+          if(newFotoBlob){ try{ fUrl = await subirImagen(newFotoBlob,"usuarios"); }catch(e){ toast("No se subió la foto","warn"); } }
+          const u = { id, pin, rol, foto_url:fUrl, synced:false };
+          await db.usuarios.put(u);
+          if(supabase && state.online){ try{ await supabase.from("usuarios").upsert({id, pin, rol, foto_url:fUrl}); await db.usuarios.put({...u, synced:true}); }catch(e){ console.warn(e); } }
+          toast("Usuario "+id+" agregado","ok");
+          $("#nu-id").value=""; $("#nu-pin").value=""; newFotoBlob=null;
+          $("#nu-foto").innerHTML="📷";
+          renderUserList();
+        };
+      },0);
+      return wrap;
+    }
+
+    /* ============================================================
+       SUCURSAL — RECIBIR
+       ============================================================ */
+    function renderRecibir(){
+      const wrap = el("div",{class:"space-y-3 fade-in"});
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Recibir Envíos</h2>`;
+      const list = el("div",{id:"rec-list",class:"space-y-3"});
+      wrap.appendChild(list);
+      (async()=>{
+        const envs = await getEnvios();
+        const pendientes = envs.filter(e=>e.sucursal_destino===state.user.id && (e.estado==="EN_TRANSITO"||!e.estado));
+        list.innerHTML = pendientes.length ? pendientes.map(e=>`
+          <div class="bg-white rounded-2xl p-4 shadow-sm border-l-4 border-brand-500">
+            <div class="flex justify-between items-start mb-2">
+              <div>
+                <p class="font-bold text-slate-800">${escapeHtml(e.productos?.nombre||"Producto")}</p>
+                <p class="text-xs text-slate-500">Enviado: ${e.cantidad_enviada} piezas</p>
+              </div>
+              <div class="text-right">
+                <span class="block text-[10px] font-mono bg-brand-50 text-brand-700 px-2 py-1 rounded font-semibold">${escapeHtml(e.lote||"-")}</span>
+                <span class="text-[10px] text-slate-400 mt-1 block">${fmtDate(e.fecha_envio)}</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2 mt-3">
+              <button data-id="${e.id}" class="rec-comp bg-emerald-600 text-white py-3 rounded-xl font-semibold text-sm active:scale-95 transition">✓ Recibí paquete completo</button>
+              <button data-id="${e.id}" class="rec-suel bg-amber-500 text-white py-3 rounded-xl font-semibold text-sm active:scale-95 transition">Recibí piezas sueltas</button>
+            </div>
+            <div id="suel-${e.id}" class="hidden mt-2 flex gap-2">
+              <input type="number" placeholder="¿Cuántas piezas?" class="flex-1 px-3 py-2 rounded-xl border border-slate-300 outline-none" />
+              <button data-id="${e.id}" class="conf-suel bg-brand-600 text-white px-4 rounded-xl font-semibold text-sm">OK</button>
+            </div>
+          </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-8">No hay envíos pendientes</p>`;
+        setTimeout(()=>{
+          list.querySelectorAll(".rec-comp").forEach(b=>b.onclick=async()=>{
+            const env = envs.find(e=>e.id===b.dataset.id);
+            const st = await confirmarRecepcion(env, 0, "completo");
+            toast("Recepción: "+st,"ok"); render();
+          });
+          list.querySelectorAll(".rec-suel").forEach(b=>b.onclick=()=>{ $("#suel-"+b.dataset.id).classList.toggle("hidden"); });
+          list.querySelectorAll(".conf-suel").forEach(b=>b.onclick=async()=>{
+            const env = envs.find(e=>e.id===b.dataset.id);
+            const input = $("#suel-"+b.dataset.id+" input");
+            const val = input.value;
+            if(!val||val<=0){ toast("Ingresa cantidad válida","err"); return; }
+            const st = await confirmarRecepcion(env, val, "sueltas");
+            toast("Recepción: "+st,"ok"); render();
+          });
+        },0);
+      })();
+      return wrap;
+    }
+
+    /* ============================================================
+       SUCURSAL — CONSULTAR
+       ============================================================ */
+    function renderConsultar(){
+      const wrap = el("div",{class:"space-y-3 fade-in"});
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Consultar Productos</h2>`;
+      const search = el("input",{type:"text", id:"c-search", placeholder:"🔍 Buscar producto...", class:"w-full px-4 py-3 rounded-xl border border-slate-300 outline-none focus:border-brand-500 bg-white"});
+      wrap.appendChild(search);
+      const list = el("div",{id:"con-list",class:"space-y-2"});
+      wrap.appendChild(list);
+
+      let allInv = [];
+      (async()=>{
+        allInv = await getInventarioSucursal(state.user.id);
+        const renderList = (q="") => {
+          const filt = allInv.filter(i=>!q || (i.productos?.nombre||"").toLowerCase().includes(q.toLowerCase()) || (i.productos?.codigo||"").toLowerCase().includes(q.toLowerCase()));
+          list.innerHTML = filt.length ? filt.map(i=>`
+            <div class="bg-white rounded-xl p-3 shadow-sm flex items-center gap-3">
+              ${i.productos?.foto_url?`<img src="${i.productos.foto_url}" class="w-12 h-12 rounded-lg object-cover" />`:`<div class="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center text-xl">📦</div>`}
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold text-sm truncate">${escapeHtml(i.productos?.nombre||"")}</p>
+                <p class="text-xs text-slate-500">Stock: <b>${i.stock_actual||0}</b></p>
+              </div>
+              <div class="text-right">
+                ${i.productos?.oferta_activa&&i.productos?.precio_oferta?`<p class="text-sm font-bold text-orange-600">${fmtMoney(i.productos.precio_oferta)}</p><p class="text-xs line-through text-slate-400">${fmtMoney(i.productos.precio_base)}</p>`:`<p class="text-sm font-bold text-emerald-600">${fmtMoney(i.productos?.precio_base)}</p>`}
+              </div>
+            </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-6">Sin resultados</p>`;
+        };
+        renderList();
+        search.oninput = ()=>renderList(search.value);
+      })();
+      return wrap;
+    }
+
+    /* ============================================================
+       SUCURSAL — MIS MERMAS
+       ============================================================ */
+    function renderMermas(){
+      const wrap = el("div",{class:"space-y-3 fade-in"});
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Mis Mermas</h2>`;
+      const list = el("div",{id:"mm-list",class:"space-y-2"});
+      wrap.appendChild(list);
+      (async()=>{
+        const mermas = await getMermas(state.user.id);
+        list.innerHTML = mermas.length ? mermas.map(m=>`
+          <div class="bg-white rounded-xl p-3 shadow-sm">
+            <div class="flex justify-between">
+              <div><p class="font-semibold text-sm">${escapeHtml(m.envios?.productos?.nombre||"Producto")}</p><p class="text-xs text-slate-500">${m.cantidad_reportada} pzs · ${escapeHtml(m.motivo||"")}</p></div>
+              <span class="text-xs font-semibold ${m.aprobado?'text-emerald-600':'text-amber-600'}">${m.aprobado?"Aprobada":"Pendiente"}</span>
+            </div>
+          </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-8">No has reportado mermas</p>`;
+      })();
+      return wrap;
+    }
+
+    /* ============================================================
+       INIT
+       ============================================================ */
+    async function init(){
+      await seedUsuariosLocal();
+      window.addEventListener("online", ()=>{ state.online=true; render(); });
+      window.addEventListener("offline",()=>{ state.online=false; render(); });
+      state.online = navigator.onLine;
+      render();
+    }
+    init();
+  </script>
+</body>
+</html>
