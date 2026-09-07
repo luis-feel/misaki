@@ -86,7 +86,8 @@
       lastSync: null,
       view: "login",
       toast: null,
-      priceNotifs: []
+      priceNotifs: [],
+      pendingSync: false
     };
     let logoutConfirmTimer = null;
     let logoutArmed = false;
@@ -123,6 +124,13 @@
     };
     const escapeHtml = s => String(s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+    function abrirFoto(url){
+      if(!url) return;
+      const fondo=el("div",{class:"fixed inset-0 z-[110] bg-black/80 p-4 flex items-center justify-center",onclick:e=>{if(e.target===fondo)fondo.remove();}});
+      fondo.appendChild(el("img",{src:url,class:"max-w-full max-h-full rounded-2xl shadow-2xl object-contain"})); document.body.appendChild(fondo);
+    }
+    function programarSync(){ state.pendingSync=true; if(supabase && state.online) setTimeout(()=>sincronizar(true),300); }
+
     function obtenerUbicacionUsuario(usuario) {
       const id = String(usuario?.id || "").toUpperCase();
       if (id.startsWith("M")) return "M";
@@ -150,8 +158,14 @@
       const csv=[encabezado,...filas].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\r\n");
       const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"})); a.download="piezas-en-transito.csv"; a.click(); URL.revokeObjectURL(a.href);
     }
+    function imprimirReporteEnTransito(envios,incluirDistribucion){
+      const w=window.open("","_blank"); if(!w) return toast("Permite ventanas emergentes para PDF","warn");
+      const filas=envios.map(e=>`<article><img src="${e.productos?.foto_url||""}"><div><b>${escapeHtml(e.productos?.nombre||"PRODUCTO")}</b><small>${escapeHtml(e.productos?.codigo||"")} · ${e.total_enviado_piezas??e.cantidad_enviada??0} PIEZAS</small>${incluirDistribucion?`<small>${e.sucursal_destino}: ${e.paquetes_enviados||0} PAQ · ${e.piezas_sueltas_enviadas||0} PZ</small>`:""}</div></article>`).join("");
+      w.document.write(`<title>Reporte en tránsito</title><style>body{font:14px Arial;padding:24px}article{display:flex;gap:12px;border-bottom:1px solid #ddd;padding:10px 0}img{width:64px;height:64px;object-fit:cover;border-radius:8px}b,small{display:block}h1{color:#0f172a}</style><h1>PIEZAS EN TRÁNSITO</h1>${filas}`);w.document.close();w.focus();setTimeout(()=>w.print(),300);
+    }
 
-    function cerrarSesionConfirmado() {
+    async function cerrarSesionConfirmado() {
+      if(state.pendingSync) await sincronizar(true);
       if (realtimeChannel) {
         try { supabase?.removeChannel(realtimeChannel); }
         catch (e) { console.warn("No se pudo cerrar Realtime", e); }
@@ -187,7 +201,7 @@
     /* ============================================================
        PARSEO POR VOZ — Motor inteligente de cantidades
        ============================================================ */
-    const WORD_NUMS = { "cero":0,"uno":1,"dos":2,"tres":3,"cuatro":4,"cinco":5,"seis":6,"siete":7,"ocho":8,"nueve":9,"diez":10,"once":11,"doce":12,"trece":13,"catorce":14,"quince":15,"dieciseis":16,"diecisiete":17,"dieciocho":18,"diecinueve":19,"veinte":20,"veintiuno":21,"veintidos":22,"veintitres":23,"veinticuatro":24,"veinticinco":25,"veintiseis":26,"veintisiete":27,"veintiocho":28,"veintinueve":29,"treinta":30,"cuarenta":40,"cincuenta":50,"sesenta":60,"setenta":70,"ochenta":80,"noventa":90,"cien":100,"mil":1000 };
+    const WORD_NUMS = { "cero":0,"uno":1,"una":1,"un":1,"dos":2,"tres":3,"cuatro":4,"cinco":5,"seis":6,"siete":7,"ocho":8,"nueve":9,"diez":10,"once":11,"doce":12,"trece":13,"catorce":14,"quince":15,"dieciseis":16,"diecisiete":17,"dieciocho":18,"diecinueve":19,"veinte":20,"veintiuno":21,"veintidos":22,"veintitres":23,"veinticuatro":24,"veinticinco":25,"veintiseis":26,"veintiocho":28,"veintinueve":29,"treinta":30,"cuarenta":40,"cincuenta":50,"sesenta":60,"setenta":70,"ochenta":80,"noventa":90,"cien":100,"mil":1000 };
 
     function wordsToNumber(token){
       token = token.toLowerCase().trim();
@@ -259,12 +273,12 @@
     function parseDistribucionVoz(text){
       const normal = text.toLowerCase().replace(/\by\b/g," ");
       const resultado = distribucionVacia(); let encontrado=false;
-      const cada = normal.match(/([\wáéíóúñ]+)\s+(?:paquetes?|cajas?)\s+a\s+cada\s+uno/);
+      const cada = normal.match(/([\wáéíóúñ]+|una?)\s+(?:paquetes?|cajas?)\s+(?:a\s+)?cada\s+(?:uno|lugar)/);
       if(cada){ const n=wordsToNumber(cada[1]); if(n===null) return {ok:false}; UBICACIONES.forEach(u=>resultado[u].paquetes=n); return {ok:true,distribucion:resultado}; }
       for(const u of UBICACIONES){
         const re1=new RegExp(`${u}\\s+([\\wáéíóúñ]+)\\s+(?:paquetes?|cajas?)(?:\\s+y\\s+([\\wáéíóúñ]+)\\s+piezas?)?`,"i");
         const re2=new RegExp(`${u}\\s+([\\wáéíóúñ]+)\\s+piezas?`,"i");
-        const re3=new RegExp(`([\\wáéíóúñ]+)\\s+(?:paquetes?|cajas?)\\s+(?:para|a)\\s+${u}`,"i");
+        const re3=new RegExp(`([\\wáéíóúñ]+)\\s*(?:paquetes?|cajas?)?\\s*(?:para|a)\\s+${u}`,"i");
         const a=normal.match(re1)||normal.match(re3), b=normal.match(re2);
         if(a){ resultado[u].paquetes=wordsToNumber(a[1])??0; if(a[2]) resultado[u].piezas=wordsToNumber(a[2])??0; encontrado=true; }
         if(b){ resultado[u].piezas=wordsToNumber(b[1])??0; encontrado=true; }
@@ -374,6 +388,7 @@
       p.id = p.id || uid();
       p.creado_en = p.creado_en || new Date().toISOString();
       await db.productos.put({...p, synced:false});
+      programarSync();
       if(p.distribucion && !SUPABASE_DISTRIBUCION_COLUMNAS_LISTAS){
         toast("Guardado local; pendiente de sincronización","warn");
         return p;
@@ -419,6 +434,7 @@
         total_enviado_piezas, lote, estado: "ENVIADO", fecha_envio: new Date().toISOString()
       };
       await db.envios.put({...envio, synced:false});
+      programarSync();
       if(!SUPABASE_DISTRIBUCION_COLUMNAS_LISTAS){
         toast("Guardado local; pendiente de sincronización","warn");
         return envio;
@@ -483,6 +499,7 @@
         confirmado_en: new Date().toISOString(),
         fecha_recepcion: new Date().toISOString() };
       await db.envios.put({...envio, synced:false});
+      programarSync();
 
       if(modo==="no_recibido" || recibidas < enviadas){
         const merma = { id:uid(), envio_id:envio.id, sucursal_id:envio.sucursal_destino, cantidad_reportada: enviadas - recibidas, motivo: modo==="no_recibido" ? "No recibido" : "Diferencia de recepción", aprobado:false };
@@ -580,9 +597,9 @@
     /* ============================================================
        SINCRONIZACIÓN
        ============================================================ */
-    async function sincronizar(){
-      if(!supabase){ toast("Supabase no configurado","err"); return; }
-      if(!state.online){ toast("Sin conexión: pendiente de sincronizar","warn"); return; }
+    async function sincronizar(silencioso=false){
+      if(!supabase){ if(!silencioso) toast("Supabase no configurado","err"); return; }
+      if(!state.online){ if(!silencioso) toast("Sin conexión: pendiente de sincronizar","warn"); return; }
       try{
         const tables = ["productos","envios","inventario_sucursal","confirmaciones_precios","mermas_pendientes","usuarios"];
         for(const t of tables){
@@ -609,11 +626,12 @@
         if(merm) await db.mermas_pendientes.bulkPut(merm.map(m=>({...m, synced:true})));
 
         state.lastSync = new Date().toISOString();
-        toast("Sincronización completada","ok");
+        state.pendingSync = false;
+        if(!silencioso) toast("Sincronización completada","ok");
         render();
       }catch(e){
         console.error(e);
-        toast("Error al sincronizar: "+e.message,"err");
+        if(!silencioso) toast("Error al sincronizar: "+e.message,"err");
       }
     }
 
@@ -828,7 +846,7 @@
         <div id="dictar-preview" class="hidden bg-brand-50 border border-brand-200 rounded-xl p-3 text-sm text-slate-700"></div>
         <div class="border-t border-brand-100 pt-3"><div class="flex justify-between items-center mb-2"><b class="text-sm text-slate-700">Distribución</b><button id="btn-dictar-distribucion" class="w-14 h-14 aspect-square bg-brand-600 text-white rounded-xl text-xs">🎙<br>Dictar</button></div><div class="grid grid-cols-3 gap-2"><div class="bg-brand-50 border border-brand-100 rounded-2xl p-2"><b class="block text-center text-brand-900">M</b><label class="text-[10px] text-slate-500">📦 Paquetes</label><input id="d-M-paquetes" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/><label class="text-[10px] text-slate-500">🧩 Piezas</label><input id="d-M-piezas" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/></div><div class="bg-brand-50 border border-brand-100 rounded-2xl p-2"><b class="block text-center text-brand-900">C</b><label class="text-[10px] text-slate-500">📦 Paquetes</label><input id="d-C-paquetes" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/><label class="text-[10px] text-slate-500">🧩 Piezas</label><input id="d-C-piezas" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/></div><div class="bg-brand-50 border border-brand-100 rounded-2xl p-2"><b class="block text-center text-brand-900">R</b><label class="text-[10px] text-slate-500">📦 Paquetes</label><input id="d-R-paquetes" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/><label class="text-[10px] text-slate-500">🧩 Piezas</label><input id="d-R-piezas" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/></div></div><p id="d-validacion" class="mt-2 text-sm font-medium text-amber-600">Falta distribuir</p><p id="dictar-distribucion-status" class="hidden text-xs text-brand-600">🎙 Escuchando...</p></div>
 
-        <div class="grid grid-cols-2 gap-2">
+        <div class="grid grid-cols-[1fr_1fr_3.5rem] gap-2 items-end">
           <div>
             <label class="text-xs font-semibold text-slate-600">Precio base</label>
             <input id="p-precio" type="number" step="any" placeholder="0" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none" />
@@ -837,11 +855,11 @@
             <label class="text-xs font-semibold text-slate-600">Precio oferta</label>
             <input id="p-oferta" type="number" step="any" placeholder="0" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none" />
           </div>
+          <button id="btn-guardar" class="w-14 h-14 aspect-square bg-emerald-600 text-white rounded-xl font-bold text-xs shadow">Guardar</button>
         </div>
         <label class="flex items-center gap-2 text-sm font-medium text-slate-700">
           <input id="p-oferta-activa" type="checkbox" class="w-5 h-5 accent-orange-500" /> Oferta activa
         </label>
-        <button id="btn-guardar" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3.5 rounded-xl font-bold shadow active:scale-95 transition">Guardar producto</button>
       `;
       wrap.appendChild(card);
 
@@ -936,8 +954,8 @@
         };
 
         $("#btn-guardar").onclick = async () => {
-          const codigo = $("#p-codigo").value.trim();
-          const nombre = $("#p-nombre").value.trim();
+          const codigo = $("#p-codigo").value.trim().toUpperCase();
+          const nombre = $("#p-nombre").value.trim().toUpperCase();
           if(!codigo||!nombre){ toast("Código y nombre son obligatorios","err"); return; }
           const paq = parseInt($("#p-paquetes").value,10)||0;
           const ppp = parseInt($("#p-ppp").value,10)||0;
@@ -1065,8 +1083,8 @@
           const envios=(await getEnvios()).filter(e=>e.estado==="ENVIADO"||e.estado==="EN_TRANSITO");
           const incluir=!!state.reporteIncluyeDistribucion;
           const grupos=Object.values(envios.reduce((a,e)=>{const k=e.producto_id;const r=a[k]||{p:e.productos,total:0,envios:[]};r.total+=Number(e.total_enviado_piezas??e.cantidad_enviada)||0;r.envios.push(e);a[k]=r;return a;},{}));
-          body.innerHTML=`<div class="bg-brand-50 rounded-2xl p-3 mb-3 flex items-center justify-between gap-2"><label class="text-sm font-medium"><input id="rep-distribucion" type="checkbox" ${incluir?"checked":""} class="accent-brand-600"/> Incluir distribución</label><button id="exportar-transito" class="bg-brand-600 text-white px-3 py-2 rounded-xl text-sm font-semibold">Exportar CSV</button></div><p class="text-sm text-slate-600 mb-2">Total en tránsito: <b>${grupos.reduce((n,g)=>n+g.total,0)} piezas</b></p><div class="space-y-2">${grupos.map(g=>`<div class="bg-white rounded-2xl p-3 shadow-sm flex gap-3">${g.p?.foto_url?`<img src="${g.p.foto_url}" class="w-14 h-14 rounded-xl object-cover"/>`:`<div class="w-14 h-14 bg-brand-50 rounded-xl flex items-center justify-center">📦</div>`}<div class="flex-1"><p class="font-semibold text-sm">${escapeHtml(g.p?.nombre||"Producto")}</p><p class="text-xs text-slate-500">${escapeHtml(g.p?.codigo||"")}</p><p class="font-bold text-brand-700 mt-1">${g.total} piezas</p>${incluir?`<p class="text-xs text-slate-600 mt-1">${g.envios.map(e=>`${e.sucursal_destino}: 📦 ${e.paquetes_enviados||0} · 🧩 ${e.piezas_sueltas_enviadas||0}`).join(" &nbsp; ")}</p>`:""}</div></div>`).join("")||"<p class='text-sm text-slate-400 text-center py-4'>Sin piezas en tránsito</p>"}</div>`;
-          $("#rep-distribucion").onchange=e=>{state.reporteIncluyeDistribucion=e.target.checked;render();}; $("#exportar-transito").onclick=()=>exportarCsvEnTransito(envios,incluir);
+          body.innerHTML=`<div class="bg-brand-50 rounded-2xl p-3 mb-3"><label class="text-sm font-medium"><input id="rep-distribucion" type="checkbox" ${incluir?"checked":""} class="accent-brand-600"/> Incluir distribución</label><div class="flex gap-2 mt-2"><button id="exportar-transito" class="flex-1 bg-brand-600 text-white px-3 py-2 rounded-xl text-sm font-semibold">CSV</button><button id="pdf-transito" class="flex-1 bg-slate-800 text-white px-3 py-2 rounded-xl text-sm font-semibold">PDF</button></div></div><p class="text-sm text-slate-600 mb-2">Total en tránsito: <b>${grupos.reduce((n,g)=>n+g.total,0)} piezas</b></p><div class="space-y-2">${grupos.map(g=>`<div class="bg-white rounded-2xl p-3 shadow-sm flex gap-3">${g.p?.foto_url?`<button class="abrir-foto" data-foto="${g.p.foto_url}"><img src="${g.p.foto_url}" class="w-14 h-14 rounded-xl object-cover"/></button>`:`<div class="w-14 h-14 bg-brand-50 rounded-xl flex items-center justify-center">📦</div>`}<div class="flex-1"><p class="font-bold text-sm uppercase">${escapeHtml(g.p?.nombre||"Producto")}</p><p class="font-bold text-xs uppercase text-slate-500">${escapeHtml(g.p?.codigo||"")}</p><p class="font-bold text-brand-700 mt-1">${g.total} piezas</p>${incluir?`<p class="text-xs text-slate-600 mt-1">${g.envios.map(e=>`${e.sucursal_destino}: 📦 ${e.paquetes_enviados||0} · 🧩 ${e.piezas_sueltas_enviadas||0}`).join(" &nbsp; ")}</p>`:""}</div></div>`).join("")||"<p class='text-sm text-slate-400 text-center py-4'>Sin piezas en tránsito</p>"}</div>`;
+          $("#rep-distribucion").onchange=e=>{state.reporteIncluyeDistribucion=e.target.checked;render();}; $("#exportar-transito").onclick=()=>exportarCsvEnTransito(envios,incluir); $("#pdf-transito").onclick=()=>imprimirReporteEnTransito(envios,incluir); body.querySelectorAll(".abrir-foto").forEach(b=>b.onclick=()=>abrirFoto(b.dataset.foto));
         }
         else if(tab==="vacio"){
           let allInv = [];
@@ -1264,7 +1282,7 @@
        ============================================================ */
     function renderRecibir(){
       const wrap = el("div",{class:"space-y-3 fade-in"});
-      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Recibir Envíos</h2>`;
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Recibir envíos</h2><div class="bg-brand-50 rounded-2xl p-2 flex gap-2 items-center"><input id="firma-lote" placeholder="RECIBIÓ / CONFIRMÓ" class="min-w-0 flex-1 px-3 py-2 rounded-xl border border-brand-200 font-semibold uppercase"/><button id="confirmar-lote" class="shrink-0 bg-brand-600 text-white px-3 py-2 rounded-xl font-semibold text-sm">Confirmar recepción</button></div>`;
       const list = el("div",{id:"rec-list",class:"space-y-3"});
       wrap.appendChild(list);
       (async()=>{
@@ -1272,23 +1290,13 @@
         const ubicacionUsuario=obtenerUbicacionUsuario(state.user);
         const pendientes = envs.filter(e=>e.sucursal_destino===ubicacionUsuario && (e.estado==="ENVIADO"||e.estado==="EN_TRANSITO"||!e.estado));
         list.innerHTML = pendientes.length ? pendientes.map(e=>`
-          <div class="bg-white rounded-2xl p-4 shadow-sm border-l-4 border-brand-500">
-            <div class="flex justify-between items-start mb-2">
-              <div>
-                <p class="font-bold text-slate-800">${escapeHtml(e.productos?.nombre||"Producto")}</p>
-                <p class="text-xs text-slate-500">Enviado: 📦 ${e.paquetes_enviados||0} · 🧩 ${e.piezas_sueltas_enviadas||0} (${e.total_enviado_piezas??e.cantidad_enviada} piezas)</p>
-              </div>
-              <div class="text-right">
-                <span class="block text-[10px] font-mono bg-brand-50 text-brand-700 px-2 py-1 rounded font-semibold">${escapeHtml(e.lote||"-")}</span>
-                <span class="text-[10px] text-slate-400 mt-1 block">${fmtDate(e.fecha_envio)}</span>
-              </div>
-            </div>
-            <div class="mt-3 space-y-2"><input id="nombre-${e.id}" placeholder="Recibió / confirmó" class="w-full px-3 py-2 rounded-xl border border-slate-300"/><label class="text-sm block">📦 Paquetes recibidos <input id="paq-${e.id}" type="number" min="0" value="0" class="float-right w-20 border rounded-lg px-2 py-1 text-center"/></label><label class="text-sm block">🧩 Piezas recibidas <input id="pzs-${e.id}" type="number" min="0" value="0" class="float-right w-20 border rounded-lg px-2 py-1 text-center"/></label><div class="grid grid-cols-2 gap-2 pt-2"><button data-id="${e.id}" class="confirmar-rec bg-brand-600 text-white py-3 rounded-xl font-semibold text-sm">Confirmar recepción</button><button data-id="${e.id}" class="no-rec bg-red-600 text-white py-3 rounded-xl font-semibold text-sm">NO RECIBIDO</button></div></div>
+          <div class="bg-white rounded-xl p-2 shadow-sm border-l-4 border-brand-500"><div class="flex gap-2 items-center"><button data-foto="${e.productos?.foto_url||""}" class="abrir-foto shrink-0">${e.productos?.foto_url?`<img src="${e.productos.foto_url}" class="w-12 h-12 rounded-lg object-cover"/>`:`<span class="w-12 h-12 bg-brand-50 rounded-lg flex items-center justify-center">📦</span>`}</button><div class="min-w-0 flex-1"><p class="font-bold text-sm uppercase truncate">${escapeHtml(e.productos?.nombre||"Producto")}</p><p class="font-bold text-xs uppercase text-slate-500">${escapeHtml(e.productos?.codigo||"")}</p><p class="text-[11px] text-slate-500">Enviado: 📦 ${e.paquetes_enviados||0} · 🧩 ${e.piezas_sueltas_enviadas||0}</p></div><button data-id="${e.id}" class="no-rec text-xs text-red-600 font-bold">NO<br>RECIBIDO</button></div><div class="grid grid-cols-2 gap-2 mt-2"><label class="text-xs">📦 Paquetes<input id="paq-${e.id}" type="number" min="0" value="0" class="w-full border rounded-lg px-2 py-1 text-center"/></label><label class="text-xs">🧩 Piezas<input id="pzs-${e.id}" type="number" min="0" value="0" class="w-full border rounded-lg px-2 py-1 text-center"/></label></div>
           </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-8">No hay envíos pendientes</p>`;
         setTimeout(()=>{
           const armado={};
-          const confirmar=(b,modo)=>b.onclick=async()=>{const id=b.dataset.id, nombre=$(`#nombre-${id}`).value.trim(); if(!nombre){toast("Escribe quién confirmó","err");return;} if(!armado[id+modo]){armado[id+modo]=true;b.textContent=modo==="no_recibido"?"Confirmar no recibido":"Confirmar";setTimeout(()=>{armado[id+modo]=false;b.textContent=modo==="no_recibido"?"NO RECIBIDO":"Confirmar recepción";},2000);return;} const env=envs.find(e=>e.id===id);const paq=Number($(`#paq-${id}`).value)||0,pzs=Number($(`#pzs-${id}`).value)||0;if(modo!=="no_recibido"&&!paq&&!pzs){toast("Usa NO RECIBIDO","err");return;}const st=await confirmarRecepcion(env,paq,pzs,nombre,modo);toast(modo==="no_recibido"?"Marcado como no recibido":st==="CONFIRMADO"?"Recepción confirmada":(Number(env.total_enviado_piezas??env.cantidad_enviada)>paq*(env.productos?.piezas_por_paquete||0)+pzs?"Recepción con diferencia":"Revisar cantidad"),modo==="no_recibido"?"err":"ok");render();};
-          list.querySelectorAll(".confirmar-rec").forEach(b=>confirmar(b,"recibido")); list.querySelectorAll(".no-rec").forEach(b=>confirmar(b,"no_recibido"));
+          $("#confirmar-lote").onclick=async()=>{const b=$("#confirmar-lote"),nombre=$("#firma-lote").value.trim().toUpperCase();if(!nombre){toast("Escribe quién confirmó","err");return;}if(!armado.lote){armado.lote=true;b.textContent="Confirmar";setTimeout(()=>{armado.lote=false;b.textContent="Confirmar recepción";},2000);return;}b.textContent="Registrando…";b.disabled=true;for(const env of pendientes){const paq=Number($(`#paq-${env.id}`).value)||0,pzs=Number($(`#pzs-${env.id}`).value)||0;if(paq||pzs)await confirmarRecepcion(env,paq,pzs,nombre,"recibido");}toast("Recepciones registradas","ok");render();};
+          list.querySelectorAll(".no-rec").forEach(b=>b.onclick=async()=>{const nombre=$("#firma-lote").value.trim().toUpperCase();if(!nombre){toast("Escribe quién confirmó","err");return;}const id=b.dataset.id;if(!armado[id]){armado[id]=true;b.textContent="Confirmar";setTimeout(()=>{armado[id]=false;b.innerHTML="NO<br>RECIBIDO";},2000);return;}b.textContent="Registrando…";await confirmarRecepcion(envs.find(e=>e.id===id),0,0,nombre,"no_recibido");toast("Marcado como no recibido","err");render();});
+          list.querySelectorAll(".abrir-foto").forEach(b=>b.onclick=()=>abrirFoto(b.dataset.foto));
         },0);
       })();
       return wrap;
@@ -1315,9 +1323,9 @@
           const filt = allInv.filter(i=>!q || (i.productos?.nombre||"").toLowerCase().includes(q.toLowerCase()) || (i.productos?.codigo||"").toLowerCase().includes(q.toLowerCase()));
           list.innerHTML = filt.length ? filt.map(i=>`
             <div class="bg-white rounded-xl p-3 shadow-sm flex items-center gap-3">
-              ${i.productos?.foto_url?`<img src="${i.productos.foto_url}" class="w-12 h-12 rounded-lg object-cover" />`:`<div class="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center text-xl">📦</div>`}
+              ${i.productos?.foto_url?`<button class="abrir-foto" data-foto="${i.productos.foto_url}"><img src="${i.productos.foto_url}" class="w-12 h-12 rounded-lg object-cover" /></button>`:`<div class="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center text-xl">📦</div>`}
               <div class="flex-1 min-w-0">
-                <p class="font-semibold text-sm truncate">${escapeHtml(i.productos?.nombre||"")}</p>
+                <p class="font-bold text-sm uppercase truncate">${escapeHtml(i.productos?.nombre||"")}</p>
                 <p class="text-xs text-slate-500">Stock: <b>${i.stock_actual||0}</b></p>
               </div>
               <div class="text-right">
@@ -1327,6 +1335,7 @@
         };
         renderList();
         search.oninput = ()=>renderList(search.value);
+        list.onclick=e=>{const b=e.target.closest(".abrir-foto");if(b)abrirFoto(b.dataset.foto);};
       })();
       return wrap;
     }
@@ -1359,6 +1368,8 @@
       await seedUsuariosLocal();
       window.addEventListener("online", ()=>{ state.online=true; render(); });
       window.addEventListener("offline",()=>{ state.online=false; render(); });
+      document.addEventListener("focusin",e=>{ if(e.target.matches('input[type="number"]') && e.target.value==="0") e.target.select(); });
+      setInterval(()=>{ if(state.pendingSync) sincronizar(true); },60000);
       state.online = navigator.onLine;
       render();
     }
