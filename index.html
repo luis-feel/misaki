@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#0f172a" />
-  <title>BodegaExpress</title>
+  <title>Distribución MM</title>
   <!-- Tailwind CSS vía CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -40,7 +40,7 @@
   <!-- ============================ APP JS ============================ -->
   <script type="module">
     /* ============================================================
-       BodegaExpress — App autónoma
+       Distribución MM — App autónoma
        Configura aquí tus credenciales de Supabase (Project URL + anon key)
        ============================================================ */
     const SUPABASE_URL = "https://ycbuzyczxrbclckabkow.supabase.co";   // <-- REEMPLAZAR
@@ -48,6 +48,9 @@
     const STORAGE_BUCKET = "productos";                        // bucket de Storage
 
     const SUCURSALES = ["M1","M2","M3","C1","C2","R1"];
+    const UBICACIONES = ["M", "C", "R"];
+    // Activar únicamente después de añadir las columnas SQL propuestas al final.
+    const SUPABASE_DISTRIBUCION_COLUMNAS_LISTAS = true;
 
     /* ---------- Supabase client ---------- */
     let supabase = null;
@@ -67,6 +70,14 @@
       mermas_pendientes:    "id,envio_id,sucursal_id,synced",
       usuarios:             "id,pin,rol,synced"
     });
+    db.version(2).stores({
+      productos:            "id,codigo,nombre,creado_en,synced",
+      envios:               "id,producto_id,sucursal_destino,estado,fecha_envio,synced",
+      inventario_sucursal:  "id,producto_id,sucursal_id,synced",
+      confirmaciones_precios:"id,producto_id,sucursal_id,synced",
+      mermas_pendientes:    "id,envio_id,sucursal_id,synced",
+      usuarios:             "id,pin,rol,synced"
+    });
 
     /* ---------- Estado global ---------- */
     const state = {
@@ -77,6 +88,8 @@
       toast: null,
       priceNotifs: []
     };
+    let logoutConfirmTimer = null;
+    let logoutArmed = false;
 
     /* ============================================================
        UTILIDADES
@@ -109,6 +122,42 @@
       return "hace "+Math.floor(s/86400)+" d";
     };
     const escapeHtml = s => String(s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+    function obtenerUbicacionUsuario(usuario) {
+      const id = String(usuario?.id || "").toUpperCase();
+      if (id.startsWith("M")) return "M";
+      if (id.startsWith("C")) return "C";
+      if (id.startsWith("R")) return "R";
+      return null;
+    }
+
+    function calcularPiezasUbicacion(producto, datos) {
+      const ppp = Number(producto?.piezas_por_paquete) || 0;
+      return (Number(datos?.paquetes) || 0) * ppp + (Number(datos?.piezas) || 0);
+    }
+
+    function calcularPiezasDistribucion(producto, distribucion) {
+      return UBICACIONES.reduce((total, ubicacion) => total + calcularPiezasUbicacion(producto, distribucion?.[ubicacion]), 0);
+    }
+
+    function distribucionVacia() {
+      return { M:{paquetes:0,piezas:0}, C:{paquetes:0,piezas:0}, R:{paquetes:0,piezas:0} };
+    }
+
+    function cerrarSesionConfirmado() {
+      if (realtimeChannel) {
+        try { supabase?.removeChannel(realtimeChannel); }
+        catch (e) { console.warn("No se pudo cerrar Realtime", e); }
+        realtimeChannel = null;
+      }
+      if (logoutConfirmTimer) clearTimeout(logoutConfirmTimer);
+      logoutConfirmTimer = null;
+      logoutArmed = false;
+      state.user = null;
+      state.view = "login";
+      state.priceNotifs = [];
+      render();
+    }
 
     /* ---------- Toast ---------- */
     function toast(msg, type="ok"){
@@ -155,7 +204,7 @@
 
     function parseVoice(text){
       const norm = text.toLowerCase();
-      const tokens = norm.split(/[\s,;.]+/);
+      const tokens = norm.replace(/\by\b/g," ").split(/[\s,;.]+/);
       const numbers = [];
       for(const tk of tokens){
         const n = wordsToNumber(tk);
@@ -164,7 +213,28 @@
       const nums = numbers;
 
       let paquetes=0, ppp=0, sueltas=0, label="";
-      if(nums.length===1){
+      const patronCompleto = norm.match(/([\wáéíóúñ]+)\s+(?:paquetes?|cajas?|sobres?|bolsas?|tiras?)\s+(?:de|con)\s+([\wáéíóúñ]+)\s+piezas?(?:\s+por\s+paquete)?\s*(?:y|más|con)?\s*([\wáéíóúñ]+)?\s*(?:piezas?\s*)?(?:sueltas?)?$/);
+      const patronPppPrimero = norm.match(/([\wáéíóúñ]+)\s+piezas?\s+por\s+paquete[,\s]+([\wáéíóúñ]+)\s+(?:paquetes?|cajas?)(?:\s+y\s+([\wáéíóúñ]+)\s+piezas?)?/);
+      if(patronPppPrimero){ paquetes=wordsToNumber(patronPppPrimero[2])||0; ppp=wordsToNumber(patronPppPrimero[1])||0; sueltas=wordsToNumber(patronPppPrimero[3]||"")||0; label="Cantidades identificadas"; }
+      if(patronCompleto){
+        paquetes=wordsToNumber(patronCompleto[1])||0; ppp=wordsToNumber(patronCompleto[2])||0;
+        sueltas=wordsToNumber(patronCompleto[3]||"")||0; label="Cantidades identificadas";
+      }
+      const paqueteMatch = norm.match(/([\wáéíóúñ]+(?:\s+y\s+[\wáéíóúñ]+)?)\s+(?:paquetes?|cajas?|sobres?|bolsas?|tiras?)/);
+      const pppMatch = norm.match(/(?:de|con)\s+([\wáéíóúñ]+(?:\s+y\s+[\wáéíóúñ]+)?)\s+piezas?(?:\s+por\s+paquete)?|([\wáéíóúñ]+(?:\s+y\s+[\wáéíóúñ]+)?)\s+piezas?\s+por\s+paquete/);
+      const sueltaMatch = norm.match(/(?:y|más|con)\s+([\wáéíóúñ]+(?:\s+y\s+[\wáéíóúñ]+)?)\s+piezas?\s*(?:sueltas?)?/);
+      if(!paquetes && paqueteMatch && pppMatch){
+        paquetes = wordsToNumber(paqueteMatch[1]) || 0;
+        ppp = wordsToNumber(pppMatch[1] || pppMatch[2]) || 0;
+        const cajas = norm.match(/([\wáéíóúñ]+)\s+cajas?\s+(?:con|de)\s+([\wáéíóúñ]+)\s+(?:sobres?|bolsas?|tiras?|paquetes?)/);
+        if(cajas) paquetes = (wordsToNumber(cajas[1])||0) * (wordsToNumber(cajas[2])||0);
+        const allPieceMatches = [...norm.matchAll(/([\wáéíóúñ]+(?:\s+y\s+[\wáéíóúñ]+)?)\s+piezas?/g)];
+        const last = allPieceMatches[allPieceMatches.length-1];
+        sueltas = last ? (wordsToNumber(last[1]) || 0) : 0;
+        if(last && (last[0].includes("por paquete") || (pppMatch[1]||pppMatch[2])===last[1])) sueltas=0;
+        label="Cantidades identificadas";
+      }
+      else if(nums.length===1){
         sueltas = nums[0]; label = "1 cantidad → sueltas";
       } else if(nums.length===2){
         paquetes = nums[0]; ppp = nums[1]; label = "2 cantidades → paquetes + piezas/paquete";
@@ -177,6 +247,22 @@
       }
       const total = (paquetes*ppp)+sueltas;
       return { ok:true, raw:text, paquetes, ppp, sueltas, total, label };
+    }
+
+    function parseDistribucionVoz(text){
+      const normal = text.toLowerCase().replace(/\by\b/g," ");
+      const resultado = distribucionVacia(); let encontrado=false;
+      const cada = normal.match(/([\wáéíóúñ]+)\s+(?:paquetes?|cajas?)\s+a\s+cada\s+uno/);
+      if(cada){ const n=wordsToNumber(cada[1]); if(n===null) return {ok:false}; UBICACIONES.forEach(u=>resultado[u].paquetes=n); return {ok:true,distribucion:resultado}; }
+      for(const u of UBICACIONES){
+        const re1=new RegExp(`${u}\\s+([\\wáéíóúñ]+)\\s+(?:paquetes?|cajas?)(?:\\s+y\\s+([\\wáéíóúñ]+)\\s+piezas?)?`,"i");
+        const re2=new RegExp(`${u}\\s+([\\wáéíóúñ]+)\\s+piezas?`,"i");
+        const re3=new RegExp(`([\\wáéíóúñ]+)\\s+(?:paquetes?|cajas?)\\s+(?:para|a)\\s+${u}`,"i");
+        const a=normal.match(re1)||normal.match(re3), b=normal.match(re2);
+        if(a){ resultado[u].paquetes=wordsToNumber(a[1])??0; if(a[2]) resultado[u].piezas=wordsToNumber(a[2])??0; encontrado=true; }
+        if(b){ resultado[u].piezas=wordsToNumber(b[1])??0; encontrado=true; }
+      }
+      return encontrado ? {ok:true,distribucion:resultado} : {ok:false};
     }
 
     /* ============================================================
@@ -279,6 +365,10 @@
       p.id = p.id || uid();
       p.creado_en = p.creado_en || new Date().toISOString();
       await db.productos.put({...p, synced:false});
+      if(p.distribucion && !SUPABASE_DISTRIBUCION_COLUMNAS_LISTAS){
+        toast("Guardado local; pendiente de sincronización","warn");
+        return p;
+      }
       if(supabase && state.online){
         try{
           const { data, error } = await supabase.from("productos").upsert(p).select().single();
@@ -307,13 +397,19 @@
       return locals.sort((a,b)=> (b.fecha_envio||"").localeCompare(a.fecha_envio||"")).map(e=>({...e, productos: prods.find(p=>p.id===e.producto_id)}));
     }
 
-    async function crearEnvio({producto_id, sucursal_destino, cantidad_enviada}){
+    async function crearEnvio({producto_id, sucursal_destino, paquetes_enviados=0, piezas_sueltas_enviadas=0, cantidad_enviada}){
       const lote = generarLote();
+      const total_enviado_piezas = Number(cantidad_enviada) || 0;
       const envio = {
-        id: uid(), producto_id, sucursal_destino, cantidad_enviada,
-        lote, estado: "EN_TRANSITO", fecha_envio: new Date().toISOString()
+        id: uid(), producto_id, sucursal_destino, cantidad_enviada: total_enviado_piezas,
+        paquetes_enviados:Number(paquetes_enviados)||0, piezas_sueltas_enviadas:Number(piezas_sueltas_enviadas)||0,
+        total_enviado_piezas, lote, estado: "ENVIADO", fecha_envio: new Date().toISOString()
       };
       await db.envios.put({...envio, synced:false});
+      if(!SUPABASE_DISTRIBUCION_COLUMNAS_LISTAS){
+        toast("Guardado local; pendiente de sincronización","warn");
+        return envio;
+      }
       if(supabase && state.online){
         try{
           const { data, error } = await supabase.from("envios").insert(envio).select().single();
@@ -331,11 +427,13 @@
       return `LOTE-${ymd}-${seq}`;
     }
 
-    async function confirmarRecepcion(envio, piezasRecibidas, modo){
+    async function confirmarRecepcion(envio, paquetesRecibidos, piezasRecibidas, confirmadoPor, modo="recibido"){
       const prod = await db.productos.get(envio.producto_id);
-      let recibidas = 0;
-      if(modo==="completo") recibidas = prod ? (prod.piezas_por_paquete||0) : 0;
-      else recibidas = parseInt(piezasRecibidas,10)||0;
+      const paquetes = Number(paquetesRecibidos)||0;
+      const piezas = Number(piezasRecibidas)||0;
+      const recibidas = modo==="no_recibido" ? 0 : calcularPiezasUbicacion(prod, {paquetes, piezas});
+      const enviadas = Number(envio.total_enviado_piezas ?? envio.cantidad_enviada) || 0;
+      const estado = modo==="no_recibido" ? "NO_RECIBIDO" : recibidas===enviadas ? "CONFIRMADO" : "CON_DIFERENCIA";
 
       let inv = (await db.inventario_sucursal.where("producto_id").equals(envio.producto_id).toArray()).find(i=>i.sucursal_id===envio.sucursal_destino);
       if(!inv){
@@ -344,24 +442,28 @@
       inv.stock_actual = (inv.stock_actual||0) + recibidas;
       await db.inventario_sucursal.put({...inv, synced:false});
 
-      let estado = "RECIBIDO_TOTAL";
-      if(recibidas===0) estado = "MERMA_PENDIENTE";
-      else if(recibidas < envio.cantidad_enviada) estado = "RECIBIDO_PARCIAL";
-      envio.estado = estado;
-      envio.fecha_recepcion = new Date().toISOString();
+      envio = {...envio, estado,
+        paquetes_recibidos: modo==="no_recibido" ? 0 : paquetes,
+        piezas_recibidas: modo==="no_recibido" ? 0 : piezas,
+        total_recibido_piezas: recibidas,
+        confirmado_por: confirmadoPor,
+        confirmado_por_usuario: state.user.id,
+        confirmado_en: new Date().toISOString(),
+        fecha_recepcion: new Date().toISOString() };
       await db.envios.put({...envio, synced:false});
 
-      if(estado==="MERMA_PENDIENTE" || estado==="RECIBIDO_PARCIAL"){
-        const merma = { id:uid(), envio_id:envio.id, sucursal_id:envio.sucursal_destino, cantidad_reportada: envio.cantidad_enviada - recibidas, motivo: estado==="MERMA_PENDIENTE" ? "No llegó nada" : "Faltante parcial", aprobado:false };
+      if(modo==="no_recibido" || recibidas < enviadas){
+        const merma = { id:uid(), envio_id:envio.id, sucursal_id:envio.sucursal_destino, cantidad_reportada: enviadas - recibidas, motivo: modo==="no_recibido" ? "No recibido" : "Diferencia de recepción", aprobado:false };
         await db.mermas_pendientes.put({...merma, synced:false});
         if(supabase && state.online){
           try{ await supabase.from("mermas_pendientes").insert(merma); await db.mermas_pendientes.put({...merma, synced:true}); }catch(e){ console.warn(e); }
         }
       }
 
-      if(supabase && state.online){
+      if(supabase && state.online && SUPABASE_DISTRIBUCION_COLUMNAS_LISTAS){
         try{
-          await supabase.from("envios").update({ estado, fecha_recepcion: envio.fecha_recepcion }).eq("id", envio.id);
+          const { synced, id, ...campos } = envio;
+          await supabase.from("envios").update(campos).eq("id", id);
           await supabase.from("inventario_sucursal").upsert(inv);
           await db.envios.put({...envio, synced:true});
           await db.inventario_sucursal.put({...inv, synced:true});
@@ -455,6 +557,7 @@
           const all = await db[t].toArray();
           const pend = all.filter(r=>r.synced===false || r.synced===0);
           for(const r of pend){
+            if(!SUPABASE_DISTRIBUCION_COLUMNAS_LISTAS && ((t==="productos" && r.distribucion) || (t==="envios" && (r.paquetes_enviados!==undefined || r.paquetes_recibidos!==undefined)))) continue;
             const { synced, ...row } = r;
             try{
               await supabase.from(t).upsert(row);
@@ -563,7 +666,7 @@
       const header = el("header",{class:"bg-brand-900 text-white sticky top-0 z-40 shadow"});
       const inner = el("div",{class:"max-w-md mx-auto px-4 py-3 flex items-center justify-between"});
       const left = el("div",{class:"flex items-center gap-2"});
-      left.appendChild(el("span",{class:"text-lg font-bold"},"📦 BodegaExpress"));
+      left.appendChild(el("span",{class:"text-lg font-bold"},"📦 Distribución MM"));
       if(state.user.foto_url){
         left.appendChild(el("img",{src:state.user.foto_url, class:"w-6 h-6 rounded-full object-cover border border-white/40"}));
       }
@@ -574,7 +677,14 @@
       const txt = state.online ? `Conectado · ${state.lastSync?("sync "+timeAgo(state.lastSync)):"sin sync"}` : "Sin conexión (local)";
       status.appendChild(dot); status.appendChild(el("span",{}, txt));
       const syncBtn = el("button",{class:"text-xs bg-white/15 hover:bg-white/25 px-3 py-1 rounded-lg font-medium", onclick: sincronizar}, state.online?"↻ Sincronizar":"Pendiente sync");
-      right.appendChild(status); right.appendChild(syncBtn);
+      const controles = el("div",{class:"flex items-center gap-2"});
+      const salir = el("button",{class:"text-xs bg-white/15 hover:bg-white/25 px-3 py-1 rounded-lg font-medium", onclick:()=>{
+        if(logoutArmed){ cerrarSesionConfirmado(); return; }
+        logoutArmed=true; salir.textContent="Confirmar"; salir.className="text-xs bg-amber-500 hover:bg-amber-400 px-3 py-1 rounded-lg font-medium";
+        logoutConfirmTimer=setTimeout(()=>{ logoutArmed=false; logoutConfirmTimer=null; salir.textContent="Salir"; salir.className="text-xs bg-white/15 hover:bg-white/25 px-3 py-1 rounded-lg font-medium"; },2000);
+      }},"Salir");
+      controles.appendChild(syncBtn); controles.appendChild(salir);
+      right.appendChild(status); right.appendChild(controles);
       inner.appendChild(left); inner.appendChild(right);
       header.appendChild(inner);
       return header;
@@ -611,7 +721,7 @@
       card.innerHTML = `
         <div class="text-center mb-6">
           <div class="text-5xl mb-2">📦</div>
-          <h1 class="text-2xl font-extrabold text-slate-900">BodegaExpress</h1>
+          <h1 class="text-2xl font-extrabold text-slate-900">Distribución MM</h1>
           <p class="text-sm text-slate-500">Logística interna</p>
         </div>
         <div class="space-y-3">
@@ -659,46 +769,32 @@
 
       const card = el("div",{class:"bg-white rounded-2xl p-4 shadow-sm space-y-3"});
       card.innerHTML = `
-        <div>
-          <label class="text-xs font-semibold text-slate-600">Foto del producto</label>
-          <div class="flex items-center gap-3 mt-1">
-            <div id="foto-preview" class="w-16 h-16 rounded-xl bg-slate-100 flex items-center justify-center text-2xl border border-dashed border-slate-300">📷</div>
-            <label class="flex-1 cursor-pointer bg-slate-100 hover:bg-slate-200 rounded-xl py-3 text-center text-sm font-medium text-slate-600">
-              Tomar / elegir foto
-              <input id="foto-input" type="file" accept="image/*" capture="environment" class="hidden" />
-            </label>
-          </div>
-        </div>
-        <div>
-          <label class="text-xs font-semibold text-slate-600">Código</label>
-          <input id="p-codigo" type="text" placeholder="Ej. PROD-001" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:border-brand-500" />
-        </div>
+        <div class="grid grid-cols-[4rem_1fr_3.5rem] gap-2 items-end"><div><label class="text-xs font-semibold text-slate-600">Foto</label><div id="foto-preview" class="mt-1 w-16 h-16 rounded-xl bg-brand-50 flex items-center justify-center text-2xl border border-dashed border-brand-200">📷</div></div><div><label class="text-xs font-semibold text-slate-600">Código</label><input id="p-codigo" type="text" placeholder="PROD-001" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:border-brand-500" /></div><label class="w-14 h-14 aspect-square cursor-pointer bg-brand-600 text-white rounded-xl flex items-center justify-center text-xl">📷<input id="foto-input" type="file" accept="image/*" capture="environment" class="hidden" /></label></div>
         <div>
           <label class="text-xs font-semibold text-slate-600">Nombre</label>
           <input id="p-nombre" type="text" placeholder="Nombre del producto" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:border-brand-500" />
         </div>
-        <div class="grid grid-cols-3 gap-2">
+        <div class="grid grid-cols-[1fr_1fr_1fr_3.5rem] gap-2 items-end">
           <div>
             <label class="text-xs font-semibold text-slate-600">Paquetes</label>
             <input id="p-paquetes" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
           </div>
           <div>
-            <label class="text-xs font-semibold text-slate-600">Piezas/paquete</label>
+            <label class="text-xs font-semibold text-slate-600">Pz por pq</label>
             <input id="p-ppp" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
           </div>
           <div>
-            <label class="text-xs font-semibold text-slate-600">Sueltas</label>
+            <label class="text-xs font-semibold text-slate-600">Piezas</label>
             <input id="p-sueltas" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border border-slate-300 outline-none text-center" />
           </div>
+          <button id="btn-dictar" class="w-14 h-14 aspect-square bg-brand-600 text-white rounded-xl font-semibold text-xs">🎙<br>Dictar</button>
         </div>
         <div id="p-total" class="text-sm font-semibold text-slate-700 bg-slate-50 rounded-lg px-3 py-2">Stock total bodega: 0</div>
         <div id="p-validacion" class="hidden text-sm text-red-600 font-medium"></div>
 
-        <button id="btn-dictar" class="w-full bg-brand-600 hover:bg-brand-700 text-white py-5 rounded-2xl font-bold text-lg shadow-md active:scale-95 transition flex items-center justify-center gap-2">
-          <span class="text-3xl">🎤</span> Dictar cantidades
-        </button>
         <div id="dictar-status" class="hidden text-center text-sm font-medium text-brand-600 animate-pulse">🎙️ Escuchando...</div>
         <div id="dictar-preview" class="hidden bg-brand-50 border border-brand-200 rounded-xl p-3 text-sm text-slate-700"></div>
+        <div class="border-t border-brand-100 pt-3"><div class="flex justify-between items-center"><b class="text-sm text-slate-700">Distribución</b><button id="btn-dictar-distribucion" class="w-14 h-14 aspect-square bg-brand-600 text-white rounded-xl text-xs">🎙<br>Dictar</button></div><div class="grid grid-cols-[4.5rem_repeat(3,1fr)] gap-2 items-center text-center mt-2"><span></span><b>M</b><b>C</b><b>R</b><label class="text-xs text-left">📦 Paquetes</label><input id="d-M-paquetes" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-C-paquetes" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-R-paquetes" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><label class="text-xs text-left">🧩 Piezas</label><input id="d-M-piezas" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-C-piezas" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-R-piezas" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/></div><p id="d-validacion" class="mt-2 text-sm font-medium text-amber-600">Falta distribuir</p><p id="dictar-distribucion-status" class="hidden text-xs text-brand-600">🎙 Escuchando...</p></div>
 
         <div class="grid grid-cols-2 gap-2">
           <div>
@@ -739,6 +835,7 @@
       })();
 
       setTimeout(()=>{
+        const obtenerDistribucion = () => Object.fromEntries(UBICACIONES.map(u=>[u,{paquetes:Number($(`#d-${u}-paquetes`).value)||0,piezas:Number($(`#d-${u}-piezas`).value)||0}]));
         const calcTotal = () => {
           const paq = parseInt($("#p-paquetes").value,10)||0;
           const ppp = parseInt($("#p-ppp").value,10)||0;
@@ -748,8 +845,11 @@
           const v = $("#p-validacion");
           if(paq>0 && ppp===0){ v.textContent="⚠️ Si hay paquetes, piezas/paquete no puede ser 0"; v.classList.remove("hidden"); }
           else v.classList.add("hidden");
+          const distribuido=calcularPiezasDistribucion({piezas_por_paquete:ppp},obtenerDistribucion());
+          const dv=$("#d-validacion"); dv.textContent=distribuido>total?"La distribución supera el total":distribuido===total&&total>0?"Distribución completa":"Falta distribuir";
+          dv.className="mt-2 text-sm font-medium "+(distribuido>total?"text-red-600":distribuido===total&&total>0?"text-emerald-600":"text-amber-600");
         };
-        ["#p-paquetes","#p-ppp","#p-sueltas"].forEach(s=>$(s).addEventListener("input",calcTotal));
+        ["#p-paquetes","#p-ppp","#p-sueltas",".d-input"].forEach(s=>document.querySelectorAll(s).forEach(n=>n.addEventListener("input",calcTotal)));
 
         $("#foto-input").onchange = async (e) => {
           const file = e.target.files[0];
@@ -791,6 +891,12 @@
           recognition.onend = () => { $("#dictar-status").classList.add("hidden"); recognition=null; };
           recognition.start();
         };
+        $("#btn-dictar-distribucion").onclick=()=>{
+          if(!SR){toast("Tu navegador no soporta dictado por voz","err");return;}
+          const r=new SR(); r.lang="es-ES"; $("#dictar-distribucion-status").classList.remove("hidden");
+          r.onresult=e=>{const d=parseDistribucionVoz(e.results[0][0].transcript); $("#dictar-distribucion-status").classList.add("hidden"); if(!d.ok){toast("No entendí la distribución","err");return;} UBICACIONES.forEach(u=>{ $(`#d-${u}-paquetes`).value=d.distribucion[u].paquetes; $(`#d-${u}-piezas`).value=d.distribucion[u].piezas; }); calcTotal();};
+          r.onerror=()=>{ $("#dictar-distribucion-status").classList.add("hidden"); toast("No entendí la distribución","err");}; r.start();
+        };
 
         $("#btn-guardar").onclick = async () => {
           const codigo = $("#p-codigo").value.trim();
@@ -800,18 +906,21 @@
           const ppp = parseInt($("#p-ppp").value,10)||0;
           const sue = parseInt($("#p-sueltas").value,10)||0;
           if(paq>0 && ppp===0){ toast("Paquetes requiere piezas/paquete > 0","err"); return; }
+          const distribucion=obtenerDistribucion(), total=paq*ppp+sue, totalDistribuido=calcularPiezasDistribucion({piezas_por_paquete:ppp},distribucion);
+          if(totalDistribuido>total){toast("La distribución supera el total","err");return;}
           let fUrl = null;
           if(fotoBlob){ try{ fUrl = await subirImagen(fotoBlob); }catch(e){ toast("No se subió la foto (¿sin conexión?)","warn"); } }
           const prod = {
             id: uid(), codigo, nombre, foto_url: fUrl,
             paquetes: paq, piezas_por_paquete: ppp, piezas_sueltas: sue,
-            stock_total_bodega: paq*ppp+sue,
+            stock_total_bodega: total, estado_distribucion:totalDistribuido>0?"ENVIADO":"PENDIENTE", distribucion, total_distribuido_piezas:totalDistribuido,
             precio_base: parseFloat($("#p-precio").value)||null,
             precio_oferta: parseFloat($("#p-oferta").value)||null,
             oferta_activa: $("#p-oferta-activa").checked,
             creado_en: new Date().toISOString()
           };
           await saveProducto(prod);
+          if(totalDistribuido>0) for(const u of UBICACIONES){const d=distribucion[u], cantidad=calcularPiezasUbicacion(prod,d);if(cantidad) await crearEnvio({producto_id:prod.id,sucursal_destino:u,paquetes_enviados:d.paquetes,piezas_sueltas_enviadas:d.piezas,cantidad_enviada:cantidad});}
           toast("Producto guardado","ok");
           render();
         };
@@ -825,7 +934,7 @@
        ============================================================ */
     function renderEnvios(){
       const wrap = el("div",{class:"space-y-4 fade-in"});
-      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Asignar Envío a Sucursal</h2>`;
+      wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Envíos por ubicación</h2>`;
       const card = el("div",{class:"bg-white rounded-2xl p-4 shadow-sm space-y-3"});
       card.innerHTML = `
         <div>
@@ -833,7 +942,7 @@
           <select id="e-producto" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none"></select>
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-600">Sucursal destino</label>
+          <label class="text-xs font-semibold text-slate-600">Ubicación destino</label>
           <select id="e-sucursal" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none"></select>
         </div>
         <div>
@@ -853,8 +962,7 @@
         const prods = await getProductos();
         const sel = $("#e-producto");
         sel.innerHTML = prods.length ? prods.map(p=>`<option value="${p.id}">${escapeHtml(p.nombre)} (${escapeHtml(p.codigo)})</option>`).join("") : `<option disabled>Sin productos</option>`;
-        const users = (await getUsuarios()).filter(u=>u.rol!=="admin");
-        $("#e-sucursal").innerHTML = users.map(u=>`<option value="${u.id}">${u.id}</option>`).join("");
+        $("#e-sucursal").innerHTML = UBICACIONES.map(u=>`<option value="${u}">${u}</option>`).join("");
         const envs = await getEnvios();
         list.innerHTML = envs.length ? envs.slice(0,20).map(e=>`
           <div class="bg-white rounded-xl p-3 shadow-sm">
@@ -1113,43 +1221,26 @@
       wrap.appendChild(list);
       (async()=>{
         const envs = await getEnvios();
-        const pendientes = envs.filter(e=>e.sucursal_destino===state.user.id && (e.estado==="EN_TRANSITO"||!e.estado));
+        const ubicacionUsuario=obtenerUbicacionUsuario(state.user);
+        const pendientes = envs.filter(e=>e.sucursal_destino===ubicacionUsuario && (e.estado==="ENVIADO"||e.estado==="EN_TRANSITO"||!e.estado));
         list.innerHTML = pendientes.length ? pendientes.map(e=>`
           <div class="bg-white rounded-2xl p-4 shadow-sm border-l-4 border-brand-500">
             <div class="flex justify-between items-start mb-2">
               <div>
                 <p class="font-bold text-slate-800">${escapeHtml(e.productos?.nombre||"Producto")}</p>
-                <p class="text-xs text-slate-500">Enviado: ${e.cantidad_enviada} piezas</p>
+                <p class="text-xs text-slate-500">Enviado: 📦 ${e.paquetes_enviados||0} · 🧩 ${e.piezas_sueltas_enviadas||0} (${e.total_enviado_piezas??e.cantidad_enviada} piezas)</p>
               </div>
               <div class="text-right">
                 <span class="block text-[10px] font-mono bg-brand-50 text-brand-700 px-2 py-1 rounded font-semibold">${escapeHtml(e.lote||"-")}</span>
                 <span class="text-[10px] text-slate-400 mt-1 block">${fmtDate(e.fecha_envio)}</span>
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-2 mt-3">
-              <button data-id="${e.id}" class="rec-comp bg-emerald-600 text-white py-3 rounded-xl font-semibold text-sm active:scale-95 transition">✓ Recibí paquete completo</button>
-              <button data-id="${e.id}" class="rec-suel bg-amber-500 text-white py-3 rounded-xl font-semibold text-sm active:scale-95 transition">Recibí piezas sueltas</button>
-            </div>
-            <div id="suel-${e.id}" class="hidden mt-2 flex gap-2">
-              <input type="number" placeholder="¿Cuántas piezas?" class="flex-1 px-3 py-2 rounded-xl border border-slate-300 outline-none" />
-              <button data-id="${e.id}" class="conf-suel bg-brand-600 text-white px-4 rounded-xl font-semibold text-sm">OK</button>
-            </div>
+            <div class="mt-3 space-y-2"><input id="nombre-${e.id}" placeholder="Recibió / confirmó" class="w-full px-3 py-2 rounded-xl border border-slate-300"/><label class="text-sm block">📦 Paquetes recibidos <input id="paq-${e.id}" type="number" min="0" value="0" class="float-right w-20 border rounded-lg px-2 py-1 text-center"/></label><label class="text-sm block">🧩 Piezas recibidas <input id="pzs-${e.id}" type="number" min="0" value="0" class="float-right w-20 border rounded-lg px-2 py-1 text-center"/></label><div class="grid grid-cols-2 gap-2 pt-2"><button data-id="${e.id}" class="confirmar-rec bg-brand-600 text-white py-3 rounded-xl font-semibold text-sm">Confirmar recepción</button><button data-id="${e.id}" class="no-rec bg-red-600 text-white py-3 rounded-xl font-semibold text-sm">NO RECIBIDO</button></div></div>
           </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-8">No hay envíos pendientes</p>`;
         setTimeout(()=>{
-          list.querySelectorAll(".rec-comp").forEach(b=>b.onclick=async()=>{
-            const env = envs.find(e=>e.id===b.dataset.id);
-            const st = await confirmarRecepcion(env, 0, "completo");
-            toast("Recepción: "+st,"ok"); render();
-          });
-          list.querySelectorAll(".rec-suel").forEach(b=>b.onclick=()=>{ $("#suel-"+b.dataset.id).classList.toggle("hidden"); });
-          list.querySelectorAll(".conf-suel").forEach(b=>b.onclick=async()=>{
-            const env = envs.find(e=>e.id===b.dataset.id);
-            const input = $("#suel-"+b.dataset.id+" input");
-            const val = input.value;
-            if(!val||val<=0){ toast("Ingresa cantidad válida","err"); return; }
-            const st = await confirmarRecepcion(env, val, "sueltas");
-            toast("Recepción: "+st,"ok"); render();
-          });
+          const armado={};
+          const confirmar=(b,modo)=>b.onclick=async()=>{const id=b.dataset.id, nombre=$(`#nombre-${id}`).value.trim(); if(!nombre){toast("Escribe quién confirmó","err");return;} if(!armado[id+modo]){armado[id+modo]=true;b.textContent=modo==="no_recibido"?"Confirmar no recibido":"Confirmar";setTimeout(()=>{armado[id+modo]=false;b.textContent=modo==="no_recibido"?"NO RECIBIDO":"Confirmar recepción";},2000);return;} const env=envs.find(e=>e.id===id);const paq=Number($(`#paq-${id}`).value)||0,pzs=Number($(`#pzs-${id}`).value)||0;if(modo!=="no_recibido"&&!paq&&!pzs){toast("Usa NO RECIBIDO","err");return;}const st=await confirmarRecepcion(env,paq,pzs,nombre,modo);toast(modo==="no_recibido"?"Marcado como no recibido":st==="CONFIRMADO"?"Recepción confirmada":(Number(env.total_enviado_piezas??env.cantidad_enviada)>paq*(env.productos?.piezas_por_paquete||0)+pzs?"Recepción con diferencia":"Revisar cantidad"),modo==="no_recibido"?"err":"ok");render();};
+          list.querySelectorAll(".confirmar-rec").forEach(b=>confirmar(b,"recibido")); list.querySelectorAll(".no-rec").forEach(b=>confirmar(b,"no_recibido"));
         },0);
       })();
       return wrap;
