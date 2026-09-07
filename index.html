@@ -144,6 +144,13 @@
       return { M:{paquetes:0,piezas:0}, C:{paquetes:0,piezas:0}, R:{paquetes:0,piezas:0} };
     }
 
+    function exportarCsvEnTransito(envios,incluirDistribucion=false){
+      const encabezado=incluirDistribucion?["Ubicación","Código","Producto","Foto","Paquetes enviados","Piezas sueltas","Total piezas","Lote","Fecha"]:["Código","Producto","Foto","Total piezas en tránsito"];
+      const filas=incluirDistribucion?envios.map(e=>[e.sucursal_destino,e.productos?.codigo||"",e.productos?.nombre||"",e.productos?.foto_url||"",e.paquetes_enviados||0,e.piezas_sueltas_enviadas||0,e.total_enviado_piezas??e.cantidad_enviada??0,e.lote||"",e.fecha_envio||""]):Object.values(envios.reduce((a,e)=>{const k=e.producto_id;const r=a[k]||{codigo:e.productos?.codigo||"",nombre:e.productos?.nombre||"",foto:e.productos?.foto_url||"",total:0};r.total+=Number(e.total_enviado_piezas??e.cantidad_enviada)||0;a[k]=r;return a;},{})).map(r=>[r.codigo,r.nombre,r.foto,r.total]);
+      const csv=[encabezado,...filas].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\r\n");
+      const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"})); a.download="piezas-en-transito.csv"; a.click(); URL.revokeObjectURL(a.href);
+    }
+
     function cerrarSesionConfirmado() {
       if (realtimeChannel) {
         try { supabase?.removeChannel(realtimeChannel); }
@@ -348,7 +355,9 @@
           const { data, error } = await supabase.from("productos").select("*").order("creado_en",{ascending:false});
           if(!error && data){
             await db.productos.bulkPut(data.map(p=>({...p, synced:true})));
-            return data;
+            const locales=await db.productos.toArray();
+            const remotos=new Set(data.map(p=>p.id));
+            return [...locales.filter(p=>!remotos.has(p.id)),...data].sort((a,b)=>(b.creado_en||"").localeCompare(a.creado_en||""));
           }
         }catch(e){ console.warn(e); }
       }
@@ -388,7 +397,11 @@
           const { data, error } = await supabase.from("envios").select("*, productos(*)").order("fecha_envio",{ascending:false});
           if(!error && data){
             await db.envios.bulkPut(data.map(e=>{ const {productos,...rest}=e; return {...rest, synced:true}; }));
-            return data;
+            const locales=await db.envios.toArray();
+            const remotos=new Set(data.map(e=>e.id));
+            const prods=await db.productos.toArray();
+            const pendientes=locales.filter(e=>!remotos.has(e.id)).map(e=>({...e,productos:prods.find(p=>p.id===e.producto_id)}));
+            return [...pendientes,...data].sort((a,b)=>(b.fecha_envio||"").localeCompare(a.fecha_envio||""));
           }
         }catch(e){ console.warn(e); }
       }
@@ -418,6 +431,25 @@
         }catch(e){ console.warn(e); }
       }
       return envio;
+    }
+
+    async function guardarDistribucionAdmin(producto, distribucion){
+      const total=calcularPiezasDistribucion(producto,distribucion);
+      if(total>Number(producto.stock_total_bodega||0)){ toast("La distribución supera el total","err"); return false; }
+      producto.distribucion=distribucion; producto.total_distribuido_piezas=total; producto.estado_distribucion=total?"ENVIADO":"PENDIENTE";
+      await db.productos.put({...producto,synced:false});
+      const envios=await db.envios.where("producto_id").equals(producto.id).toArray();
+      for(const u of UBICACIONES){ const d=distribucion[u], envio=envios.find(e=>e.sucursal_destino===u), piezas=calcularPiezasUbicacion(producto,d); if(envio && ["CONFIRMADO","NO_RECIBIDO","CON_DIFERENCIA"].includes(envio.estado)){ continue; } if(envio){ await db.envios.put({...envio,paquetes_enviados:d.paquetes,piezas_sueltas_enviadas:d.piezas,total_enviado_piezas:piezas,cantidad_enviada:piezas,estado:piezas?"ENVIADO":"PENDIENTE",synced:false}); } else if(piezas){ await crearEnvio({producto_id:producto.id,sucursal_destino:u,paquetes_enviados:d.paquetes,piezas_sueltas_enviadas:d.piezas,cantidad_enviada:piezas}); } }
+      toast("Distribución actualizada","ok"); return true;
+    }
+
+    async function eliminarProducto(id){
+      const envios=await db.envios.where("producto_id").equals(id).toArray();
+      await db.productos.delete(id);
+      await db.envios.bulkDelete(envios.map(e=>e.id));
+      const inv=await db.inventario_sucursal.where("producto_id").equals(id).toArray();
+      await db.inventario_sucursal.bulkDelete(inv.map(i=>i.id));
+      if(supabase && state.online){ try{ await supabase.from("inventario_sucursal").delete().eq("producto_id",id); await supabase.from("envios").delete().eq("producto_id",id); await supabase.from("productos").delete().eq("id",id); }catch(e){console.warn("Eliminación pendiente de sincronización",e);} }
     }
 
     function generarLote(){
@@ -794,7 +826,7 @@
 
         <div id="dictar-status" class="hidden text-center text-sm font-medium text-brand-600 animate-pulse">🎙️ Escuchando...</div>
         <div id="dictar-preview" class="hidden bg-brand-50 border border-brand-200 rounded-xl p-3 text-sm text-slate-700"></div>
-        <div class="border-t border-brand-100 pt-3"><div class="flex justify-between items-center"><b class="text-sm text-slate-700">Distribución</b><button id="btn-dictar-distribucion" class="w-14 h-14 aspect-square bg-brand-600 text-white rounded-xl text-xs">🎙<br>Dictar</button></div><div class="grid grid-cols-[4.5rem_repeat(3,1fr)] gap-2 items-center text-center mt-2"><span></span><b>M</b><b>C</b><b>R</b><label class="text-xs text-left">📦 Paquetes</label><input id="d-M-paquetes" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-C-paquetes" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-R-paquetes" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><label class="text-xs text-left">🧩 Piezas</label><input id="d-M-piezas" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-C-piezas" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/><input id="d-R-piezas" type="number" value="0" min="0" class="d-input border rounded-lg p-2 text-center"/></div><p id="d-validacion" class="mt-2 text-sm font-medium text-amber-600">Falta distribuir</p><p id="dictar-distribucion-status" class="hidden text-xs text-brand-600">🎙 Escuchando...</p></div>
+        <div class="border-t border-brand-100 pt-3"><div class="flex justify-between items-center mb-2"><b class="text-sm text-slate-700">Distribución</b><button id="btn-dictar-distribucion" class="w-14 h-14 aspect-square bg-brand-600 text-white rounded-xl text-xs">🎙<br>Dictar</button></div><div class="grid grid-cols-3 gap-2"><div class="bg-brand-50 border border-brand-100 rounded-2xl p-2"><b class="block text-center text-brand-900">M</b><label class="text-[10px] text-slate-500">📦 Paquetes</label><input id="d-M-paquetes" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/><label class="text-[10px] text-slate-500">🧩 Piezas</label><input id="d-M-piezas" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/></div><div class="bg-brand-50 border border-brand-100 rounded-2xl p-2"><b class="block text-center text-brand-900">C</b><label class="text-[10px] text-slate-500">📦 Paquetes</label><input id="d-C-paquetes" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/><label class="text-[10px] text-slate-500">🧩 Piezas</label><input id="d-C-piezas" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/></div><div class="bg-brand-50 border border-brand-100 rounded-2xl p-2"><b class="block text-center text-brand-900">R</b><label class="text-[10px] text-slate-500">📦 Paquetes</label><input id="d-R-paquetes" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/><label class="text-[10px] text-slate-500">🧩 Piezas</label><input id="d-R-piezas" type="number" value="0" min="0" class="d-input w-full border rounded-lg p-2 text-center"/></div></div><p id="d-validacion" class="mt-2 text-sm font-medium text-amber-600">Falta distribuir</p><p id="dictar-distribucion-status" class="hidden text-xs text-brand-600">🎙 Escuchando...</p></div>
 
         <div class="grid grid-cols-2 gap-2">
           <div>
@@ -830,11 +862,16 @@
             </div>
             <div class="text-right">
               ${p.oferta_activa&&p.precio_oferta?`<p class="text-sm font-bold text-orange-600">${fmtMoney(p.precio_oferta)}</p><p class="text-xs line-through text-slate-400">${fmtMoney(p.precio_base)}</p>`:`<p class="text-sm font-bold text-emerald-600">${fmtMoney(p.precio_base)}</p>`}
+              <button data-id="${p.id}" class="editar-dist mt-1 text-xs text-brand-600 font-semibold">Distribuir</button>
+              <button data-id="${p.id}" class="editar-precio mt-1 ml-2 text-xs text-emerald-600 font-semibold">Precio</button>
+              <button data-id="${p.id}" class="eliminar-prod mt-1 ml-2 text-xs text-red-600 font-semibold">Eliminar</button>
             </div>
           </div>`).join("") : `<p class="text-sm text-slate-400 text-center py-4">Sin productos aún</p>`;
       })();
 
       setTimeout(()=>{
+        const editando=state.editarDistribucion||null;
+        const editandoPrecio=state.editarPrecio||null;
         const obtenerDistribucion = () => Object.fromEntries(UBICACIONES.map(u=>[u,{paquetes:Number($(`#d-${u}-paquetes`).value)||0,piezas:Number($(`#d-${u}-piezas`).value)||0}]));
         const calcTotal = () => {
           const paq = parseInt($("#p-paquetes").value,10)||0;
@@ -908,6 +945,8 @@
           if(paq>0 && ppp===0){ toast("Paquetes requiere piezas/paquete > 0","err"); return; }
           const distribucion=obtenerDistribucion(), total=paq*ppp+sue, totalDistribuido=calcularPiezasDistribucion({piezas_por_paquete:ppp},distribucion);
           if(totalDistribuido>total){toast("La distribución supera el total","err");return;}
+          if(state.editarPrecio){ const actualizado={...state.editarPrecio,precio_base:parseFloat($("#p-precio").value)||null,precio_oferta:parseFloat($("#p-oferta").value)||null,oferta_activa:$("#p-oferta-activa").checked}; await saveProducto(actualizado); state.editarPrecio=null; toast("Precio actualizado","ok"); render(); return; }
+          if(state.editarDistribucion){ const actualizado={...state.editarDistribucion,distribucion}; if(await guardarDistribucionAdmin(actualizado,distribucion)){state.editarDistribucion=null;render();} return; }
           let fUrl = null;
           if(fotoBlob){ try{ fUrl = await subirImagen(fotoBlob); }catch(e){ toast("No se subió la foto (¿sin conexión?)","warn"); } }
           const prod = {
@@ -924,6 +963,8 @@
           toast("Producto guardado","ok");
           render();
         };
+        const cargarProducto=async(id,tipo)=>{const p=await db.productos.get(id);if(!p)return;state.editarDistribucion=tipo==="dist"?p:null;state.editarPrecio=tipo==="precio"?p:null;$("#p-codigo").value=p.codigo||"";$("#p-nombre").value=p.nombre||"";$("#p-paquetes").value=p.paquetes||0;$("#p-ppp").value=p.piezas_por_paquete||0;$("#p-sueltas").value=p.piezas_sueltas||0;$("#p-precio").value=p.precio_base||"";$("#p-oferta").value=p.precio_oferta||"";$("#p-oferta-activa").checked=!!p.oferta_activa;UBICACIONES.forEach(u=>{$(`#d-${u}-paquetes`).value=p.distribucion?.[u]?.paquetes||0;$(`#d-${u}-piezas`).value=p.distribucion?.[u]?.piezas||0;});$("#btn-guardar").textContent=tipo==="precio"?"Guardar precio":"Guardar distribución";calcTotal();window.scrollTo({top:0,behavior:"smooth"});};
+        const eliminando={}; list.onclick=async e=>{const del=e.target.closest(".eliminar-prod");if(del){const id=del.dataset.id;if(!eliminando[id]){eliminando[id]=true;del.textContent="Confirmar";setTimeout(()=>{eliminando[id]=false;del.textContent="Eliminar";},2000);return;}await eliminarProducto(id);toast("Producto eliminado","ok");render();return;}const precio=e.target.closest(".editar-precio");if(precio){cargarProducto(precio.dataset.id,"precio");return;}const b=e.target.closest(".editar-dist");if(b)cargarProducto(b.dataset.id,"dist");};
       },0);
 
       return wrap;
@@ -1001,9 +1042,9 @@
       const wrap = el("div",{class:"space-y-4 fade-in"});
       wrap.innerHTML = `<h2 class="text-xl font-bold text-slate-900">Reportes</h2>`;
       const tabs = el("div",{class:"flex gap-2 overflow-x-auto no-scrollbar"});
-      ["stock","vacio","mermas","lecturas"].forEach((t)=>{
+      ["stock","transito","vacio","mermas","lecturas"].forEach((t)=>{
         const btn = el("button",{class:"px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap "+(state.rtab===t?"bg-brand-600 text-white":"bg-white text-slate-600 shadow-sm"), onclick:()=>{state.rtab=t; render();}}, 
-          t==="stock"?"Stock general":t==="vacio"?"Stock vacío":t==="mermas"?"Mermas por aprobar":"Lecturas de precios");
+          t==="stock"?"Stock general":t==="transito"?"En tránsito":t==="vacio"?"Stock vacío":t==="mermas"?"Mermas por aprobar":"Lecturas de precios");
         tabs.appendChild(btn);
       });
       wrap.appendChild(tabs);
@@ -1019,6 +1060,13 @@
               <div><p class="font-semibold text-sm">${escapeHtml(p.nombre)}</p><p class="text-xs text-slate-500">${escapeHtml(p.codigo)}</p></div>
               <p class="font-bold text-lg ${p.stock_total_bodega<=0?'text-red-600':'text-emerald-600'}">${p.stock_total_bodega||0}</p>
             </div>`).join("")||"<p class='text-sm text-slate-400'>Sin datos</p>"}</div>`;
+        }
+        else if(tab==="transito"){
+          const envios=(await getEnvios()).filter(e=>e.estado==="ENVIADO"||e.estado==="EN_TRANSITO");
+          const incluir=!!state.reporteIncluyeDistribucion;
+          const grupos=Object.values(envios.reduce((a,e)=>{const k=e.producto_id;const r=a[k]||{p:e.productos,total:0,envios:[]};r.total+=Number(e.total_enviado_piezas??e.cantidad_enviada)||0;r.envios.push(e);a[k]=r;return a;},{}));
+          body.innerHTML=`<div class="bg-brand-50 rounded-2xl p-3 mb-3 flex items-center justify-between gap-2"><label class="text-sm font-medium"><input id="rep-distribucion" type="checkbox" ${incluir?"checked":""} class="accent-brand-600"/> Incluir distribución</label><button id="exportar-transito" class="bg-brand-600 text-white px-3 py-2 rounded-xl text-sm font-semibold">Exportar CSV</button></div><p class="text-sm text-slate-600 mb-2">Total en tránsito: <b>${grupos.reduce((n,g)=>n+g.total,0)} piezas</b></p><div class="space-y-2">${grupos.map(g=>`<div class="bg-white rounded-2xl p-3 shadow-sm flex gap-3">${g.p?.foto_url?`<img src="${g.p.foto_url}" class="w-14 h-14 rounded-xl object-cover"/>`:`<div class="w-14 h-14 bg-brand-50 rounded-xl flex items-center justify-center">📦</div>`}<div class="flex-1"><p class="font-semibold text-sm">${escapeHtml(g.p?.nombre||"Producto")}</p><p class="text-xs text-slate-500">${escapeHtml(g.p?.codigo||"")}</p><p class="font-bold text-brand-700 mt-1">${g.total} piezas</p>${incluir?`<p class="text-xs text-slate-600 mt-1">${g.envios.map(e=>`${e.sucursal_destino}: 📦 ${e.paquetes_enviados||0} · 🧩 ${e.piezas_sueltas_enviadas||0}`).join(" &nbsp; ")}</p>`:""}</div></div>`).join("")||"<p class='text-sm text-slate-400 text-center py-4'>Sin piezas en tránsito</p>"}</div>`;
+          $("#rep-distribucion").onchange=e=>{state.reporteIncluyeDistribucion=e.target.checked;render();}; $("#exportar-transito").onclick=()=>exportarCsvEnTransito(envios,incluir);
         }
         else if(tab==="vacio"){
           let allInv = [];
@@ -1260,6 +1308,9 @@
       let allInv = [];
       (async()=>{
         allInv = await getInventarioSucursal(state.user.id);
+        const productos = await getProductos();
+        const existentes = new Set(allInv.map(i=>i.producto_id));
+        productos.filter(p=>!existentes.has(p.id)).forEach(p=>allInv.push({producto_id:p.id,stock_actual:0,productos:p}));
         const renderList = (q="") => {
           const filt = allInv.filter(i=>!q || (i.productos?.nombre||"").toLowerCase().includes(q.toLowerCase()) || (i.productos?.codigo||"").toLowerCase().includes(q.toLowerCase()));
           list.innerHTML = filt.length ? filt.map(i=>`
