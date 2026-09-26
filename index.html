@@ -20,237 +20,176 @@
   <script src="https://unpkg.com/dexie@3.2.6/dist/dexie.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <style>
-    html,body{height:100%;}
+    html,body{height:100%; margin:0;}
     body{font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:#f1f5f9;}
     .no-scrollbar::-webkit-scrollbar{display:none;}
-    .no-scrollbar{-ms-overflow-style:none;scrollbar-width:none;}
-    .fade-in{animation:fadeIn .25s ease-out;}
-    @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-    input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+    input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;}
   </style>
 </head>
 <body class="text-slate-800">
   <div id="app"></div>
 
   <script type="module">
-    // ============================================================
-    // CONFIGURACIÓN
-    // ============================================================
+    // ===================== CONFIG =====================
     const SUPABASE_URL = "https://ycbuzyczxrbclckabkow.supabase.co";
-    const SUPABASE_KEY = "sb_publishable_fecbB60tAvSsHUZFf3OmYg_CFqG2NVW"; // Cambia por tu key nueva
+    const SUPABASE_KEY = "sb_publishable_fecbB60tAvSsHUZFf3OmYg_CFqG2NVW"; // Cámbiala
     const STORAGE_BUCKET = "productos";
+    const UBICACIONES = ["M","C","R"];
+    const ALIAS = {m:"M",misaki:"M",isla:"M",eme:"M",c:"C",chiltepec:"C",chilte:"C",r:"R",rodriguez:"R","rodríguez":"R"};
 
-    const UBICACIONES = ["M", "C", "R"];
-    const ALIAS = {
-      m:"M", misaki:"M", isla:"M", eme:"M",
-      c:"C", chiltepec:"C", chilte:"C",
-      r:"R", rodriguez:"R", "rodríguez":"R"
+    // Sinónimos básicos (puedes ampliar)
+    const SINONIMOS = {
+      "pluma":["boligrafo","bolígrafo","lapicero"],
+      "boligrafo":["pluma","lapicero"],
+      "batidor":["batidora","bate huevos"],
+      "batidora":["batidor"],
+      "bateria":["powerbank","batería de respaldo"],
+      "powerbank":["bateria","batería"]
     };
 
     let supabase = null;
     try {
-      if (window.supabase && SUPABASE_URL.startsWith("https://")) {
-        supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-      }
-    } catch(e){ console.warn(e); }
+      if (window.supabase) supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    } catch(e){}
 
-    const db = new Dexie("BodegaMM_v3");
+    const db = new Dexie("BodegaMM_v4");
     db.version(1).stores({
       productos: "id, codigo, nombre, estado, synced",
-      compras: "id, producto_id, fecha, synced",
+      compras: "id, producto_id, fecha, nota, synced",
       envios: "id, producto_id, sucursal_destino, estado, synced",
-      inventario_sucursal: "id, producto_id, sucursal_id, synced",
-      mermas: "id, producto_id, sucursal_id, synced",
-      usuarios: "id, pin, rol, synced"
+      usuarios: "id, pin, rol, synced",
+      config: "key"
     });
 
-    const state = {
-      user: null,
-      online: navigator.onLine,
-      view: "login",
-      toast: null,
-      lastSync: null
-    };
+    const state = { user:null, online:navigator.onLine, view:"login", toast:null, rtab:"compra" };
 
-    // ============================================================
-    // UTILIDADES
-    // ============================================================
-    const $ = (s, r=document) => r.querySelector(s);
-    const el = (tag, props={}, ...kids) => {
-      const n = document.createElement(tag);
+    // ===================== UTILS =====================
+    const $ = (s,r=document)=>r.querySelector(s);
+    const el = (tag, props={}, ...kids)=>{
+      const n=document.createElement(tag);
       Object.entries(props).forEach(([k,v])=>{
         if(k==="class") n.className=v;
         else if(k==="html") n.innerHTML=v;
-        else if(k.startsWith("on") && typeof v==="function") n.addEventListener(k.slice(2).toLowerCase(),v);
+        else if(k.startsWith("on")&&typeof v==="function") n.addEventListener(k.slice(2).toLowerCase(),v);
         else n.setAttribute(k,v);
       });
-      kids.flat().forEach(c=>{
-        if(c==null||c===false) return;
-        n.appendChild(typeof c==="string"||typeof c==="number" ? document.createTextNode(String(c)) : c);
-      });
+      kids.flat().forEach(c=>{ if(c!=null&&c!==false) n.appendChild(typeof c==="string"||typeof c==="number"?document.createTextNode(c):c); });
       return n;
     };
-    const uid = () => crypto.randomUUID?.() || "id-"+Date.now();
-    const escapeHtml = s => String(s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-    const fmtMoney = n => "$"+(Number(n||0)).toLocaleString("es-MX");
+    const uid = ()=>crypto.randomUUID?.()||("id-"+Date.now());
+    const escapeHtml = s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    const hoyNota = ()=>{
+      const d=new Date();
+      return "P"+String(d.getFullYear()).slice(2)+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0");
+    };
 
-    function toast(msg, type="ok"){
-      state.toast = {msg, type};
+    function toast(msg,type="ok"){
+      state.toast={msg,type};
       renderToast();
-      setTimeout(()=>{state.toast=null; renderToast();}, 2800);
+      setTimeout(()=>{state.toast=null;renderToast();},2500);
     }
     function renderToast(){
-      let t = $("#toast");
-      if(!state.toast){ if(t) t.remove(); return; }
-      if(!t){
-        t = el("div",{id:"toast", class:"fixed bottom-20 left-1/2 -translate-x-1/2 z-[100] px-5 py-3 rounded-xl shadow-lg text-white text-sm font-medium max-w-[90%] text-center"});
-        document.body.appendChild(t);
-      }
-      t.className = "fixed bottom-20 left-1/2 -translate-x-1/2 z-[100] px-5 py-3 rounded-xl shadow-lg text-white text-sm font-medium max-w-[90%] text-center " +
-        (state.toast.type==="ok"?"bg-emerald-600":state.toast.type==="warn"?"bg-amber-500":"bg-red-600");
-      t.textContent = state.toast.msg;
+      let t=$("#toast");
+      if(!state.toast){if(t)t.remove();return;}
+      if(!t){t=el("div",{id:"toast",class:"fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[90%] text-center"});document.body.appendChild(t);}
+      t.className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[90%] text-center "+(state.toast.type==="ok"?"bg-emerald-600":state.toast.type==="warn"?"bg-amber-500":"bg-red-600");
+      t.textContent=state.toast.msg;
     }
 
-    // ============================================================
-    // PARSER DE VOZ (cantidades + distribución)
-    // ============================================================
-    const WORD_NUMS = {
-      cero:0,uno:1,una:1,un:1,dos:2,tres:3,cuatro:4,cinco:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,
-      once:11,doce:12,trece:13,catorce:14,quince:15,veinte:20,treinta:30,cuarenta:40,cincuenta:50,
-      sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,mil:1000
-    };
-    function wordsToNumber(t){
-      t = (t||"").toLowerCase().trim();
-      if(/^\d+$/.test(t)) return parseInt(t,10);
-      return WORD_NUMS[t] ?? null;
-    }
+    // ===================== VOZ =====================
+    const WORD_NUMS={cero:0,uno:1,una:1,un:1,dos:2,tres:3,cuatro:4,cinco:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,once:11,doce:12,trece:13,catorce:14,quince:15,veinte:20,treinta:30,cuarenta:40,cincuenta:50,sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,mil:1000};
+    function wordsToNumber(t){t=(t||"").toLowerCase().trim();if(/^\d+$/.test(t))return parseInt(t,10);return WORD_NUMS[t]??null;}
 
     function parseCantidades(text){
-      const norm = text.toLowerCase().replace(/á/g,"a").replace(/é/g,"e").replace(/í/g,"i").replace(/ó/g,"o").replace(/ú/g,"u");
-      const nums = [];
-      norm.split(/[\s,;.]+/).forEach(tk=>{
-        const n = wordsToNumber(tk);
-        if(n!==null) nums.push(n);
-      });
+      const norm=text.toLowerCase().replace(/[áéíóú]/g,c=>({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c]));
+      let paquetes=0,ppp=0,sueltas=0,cajas=0,paqPorCaja=0;
 
-      let paquetes=0, ppp=0, sueltas=0;
+      // 2 cajas con 24 paquetes de 10
+      const cajaMatch=norm.match(/(\d+|\w+)\s*cajas?\s*(?:con|de)?\s*(\d+|\w+)\s*(?:paquetes?|bolsas?)/);
+      if(cajaMatch){cajas=wordsToNumber(cajaMatch[1])||0;paqPorCaja=wordsToNumber(cajaMatch[2])||0;paquetes=cajas*paqPorCaja;}
 
-      // Patrones comunes
-      const m1 = norm.match(/(\d+|\w+)\s*(?:paquetes?|cajas?|bolsas?)\s*(?:de|con)?\s*(\d+|\w+)\s*piezas?/);
-      const m2 = norm.match(/(\d+|\w+)\s*piezas?\s*por\s*paquete/);
-      const m3 = norm.match(/(\d+|\w+)\s*piezas?\s*sueltas?/);
+      const nums=[];
+      norm.split(/[\s,;.]+/).forEach(tk=>{const n=wordsToNumber(tk);if(n!==null)nums.push(n);});
 
-      if(m1){
-        paquetes = wordsToNumber(m1[1])||0;
-        ppp = wordsToNumber(m1[2])||0;
-      }
-      if(nums.length===1){ sueltas = nums[0]; }
-      else if(nums.length===2){ paquetes=nums[0]; ppp=nums[1]; }
-      else if(nums.length>=3){ paquetes=nums[0]; ppp=nums[1]; sueltas=nums[2]; }
-
-      // Convertir cajas a paquetes si se detecta
-      const cajas = norm.match(/(\d+|\w+)\s*cajas?\s*(?:con|de)?\s*(\d+|\w+)\s*(?:paquetes?|bolsas?)/);
-      if(cajas){
-        const nc = wordsToNumber(cajas[1])||0;
-        const np = wordsToNumber(cajas[2])||0;
-        paquetes = nc * np;
+      if(!paquetes){
+        if(nums.length===1) sueltas=nums[0];
+        else if(nums.length===2){paquetes=nums[0];ppp=nums[1];}
+        else if(nums.length>=3){paquetes=nums[0];ppp=nums[1];sueltas=nums[2];}
+      } else if(nums.length>=1){
+        // ya tenemos paquetes por cajas, buscamos ppp y sueltas
+        const pppMatch=norm.match(/(\d+|\w+)\s*piezas?\s*(?:por\s*)?(?:paquete|bolsa)/);
+        if(pppMatch) ppp=wordsToNumber(pppMatch[1])||0;
+        else if(nums.length>=2) ppp=nums[1];
+        const sueltaMatch=norm.match(/(\d+|\w+)\s*piezas?\s*sueltas?/);
+        if(sueltaMatch) sueltas=wordsToNumber(sueltaMatch[1])||0;
       }
 
-      const total = paquetes * ppp + sueltas;
-      return {ok: total>0, paquetes, ppp, sueltas, total, raw:text};
+      const total=paquetes*ppp+sueltas;
+      return {ok:total>0||paquetes>0,paquetes,ppp,sueltas,cajas,paqPorCaja,total,raw:text};
     }
 
-    function parseDistribucion(text, totalPiezas=0){
-      const norm = text.toLowerCase()
-        .replace(/á/g,"a").replace(/é/g,"e").replace(/í/g,"i").replace(/ó/g,"o").replace(/ú/g,"u")
-        .replace(/\by\b/g," ");
+    function parseDistribucion(text,totalPiezas=0){
+      const norm=text.toLowerCase().replace(/[áéíóú]/g,c=>({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c])).replace(/\by\b/g," ");
+      const res={M:{paquetes:0,piezas:0},C:{paquetes:0,piezas:0},R:{paquetes:0,piezas:0}};
+      let found=false;
 
-      const res = {M:{paquetes:0,piezas:0}, C:{paquetes:0,piezas:0}, R:{paquetes:0,piezas:0}};
-      let found = false;
-
-      // Todo para X
-      const todo = norm.match(/todo\s+(?:para|a)\s+(\w+)/);
-      if(todo){
-        const u = ALIAS[todo[1]] || todo[1].toUpperCase();
-        if(UBICACIONES.includes(u)){
-          res[u].piezas = totalPiezas;
-          return {ok:true, distribucion:res};
-        }
+      if(/todo\s+(?:para|a)\s+(\w+)/.test(norm)){
+        const u=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
+        if(UBICACIONES.includes(u)){res[u].piezas=totalPiezas;return {ok:true,distribucion:res};}
       }
-
-      // 1 a cada uno / uno a cada quien
       if(/cada\s+(uno|quien|lugar)/.test(norm)){
-        const n = wordsToNumber(norm.match(/(\d+|\w+)\s*(?:a\s+)?cada/)?.[1]) || 1;
-        UBICACIONES.forEach(u => res[u].paquetes = n);
-        return {ok:true, distribucion:res};
+        const n=wordsToNumber(norm.match(/(\d+|\w+)\s*(?:a\s+)?cada/)?.[1])||1;
+        UBICACIONES.forEach(u=>res[u].paquetes=n);
+        return {ok:true,distribucion:res};
       }
-
-      // Patrones por ubicación
-      for(const [alias, ubic] of Object.entries(ALIAS)){
-        const re = new RegExp(`(\\d+|\\w+)\\s*(?:paquetes?|piezas?)?\\s*(?:para|a|en)?\\s*${alias}`,"i");
-        const m = norm.match(re);
-        if(m){
-          const n = wordsToNumber(m[1]) ?? parseInt(m[1]) ?? 0;
-          if(norm.includes("pieza")) res[ubic].piezas += n;
-          else res[ubic].paquetes += n;
-          found = true;
-        }
+      for(const [alias,ubic] of Object.entries(ALIAS)){
+        const re=new RegExp(`(\\d+|\\w+)\\s*(?:paquetes?|piezas?)?\\s*(?:para|a|en)?\\s*${alias}`,"i");
+        const m=norm.match(re);
+        if(m){const n=wordsToNumber(m[1])??parseInt(m[1])??0; if(norm.includes("pieza")) res[ubic].piezas+=n; else res[ubic].paquetes+=n; found=true;}
       }
-
-      // Formato corto: "2m 1c 1r" o "1,1,1"
-      const corto = norm.match(/(\d+)\s*m\s*(\d+)\s*c\s*(\d+)\s*r/i) || norm.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if(corto){
-        res.M.paquetes = parseInt(corto[1])||0;
-        res.C.paquetes = parseInt(corto[2])||0;
-        res.R.paquetes = parseInt(corto[3])||0;
-        found = true;
-      }
-
-      return found ? {ok:true, distribucion:res} : {ok:false};
+      const corto=norm.match(/(\d+)\s*m\s*(\d+)\s*c\s*(\d+)\s*r/i)||norm.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if(corto){res.M.paquetes=+corto[1]||0;res.C.paquetes=+corto[2]||0;res.R.paquetes=+corto[3]||0;found=true;}
+      return found?{ok:true,distribucion:res}:{ok:false};
     }
 
-    // ============================================================
-    // IMAGEN
-    // ============================================================
+    // ===================== IMAGEN =====================
     async function procesarImagen(file){
       return new Promise((resolve,reject)=>{
-        const reader = new FileReader();
-        reader.onload = e => {
-          const img = new Image();
-          img.onload = () => {
-            const c = document.createElement("canvas");
-            c.width=96; c.height=96;
-            const ctx = c.getContext("2d");
-            const r = Math.max(96/img.width,96/img.height);
+        const reader=new FileReader();
+        reader.onload=e=>{
+          const img=new Image();
+          img.onload=()=>{
+            const c=document.createElement("canvas");
+            c.width=96;c.height=96;
+            const ctx=c.getContext("2d");
+            const r=Math.max(96/img.width,96/img.height);
             ctx.drawImage(img,(96-img.width*r)/2,(96-img.height*r)/2,img.width*r,img.height*r);
             c.toBlob(b=>resolve(b),"image/webp",0.7);
           };
-          img.src = e.target.result;
+          img.src=e.target.result;
         };
         reader.readAsDataURL(file);
       });
     }
     async function subirImagen(blob){
       if(!supabase||!state.online) return null;
-      const path = `productos/${uid()}.webp`;
-      const {error} = await supabase.storage.from(STORAGE_BUCKET).upload(path,blob,{contentType:"image/webp"});
+      const path=`productos/${uid()}.webp`;
+      const {error}=await supabase.storage.from(STORAGE_BUCKET).upload(path,blob,{contentType:"image/webp"});
       if(error) throw error;
       return supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl;
     }
 
-    // ============================================================
-    // AUTH + SYNC
-    // ============================================================
-    async function login(codigo, pin){
-      codigo = codigo.trim().toUpperCase();
-      if(supabase && state.online){
-        const {data} = await supabase.from("usuarios").select("*").eq("id",codigo).eq("pin",pin).maybeSingle();
-        if(data){ await db.usuarios.put({...data,synced:true}); return data; }
+    // ===================== AUTH + CONFIG =====================
+    async function login(codigo,pin){
+      codigo=codigo.trim().toUpperCase();
+      if(supabase&&state.online){
+        const {data}=await supabase.from("usuarios").select("*").eq("id",codigo).eq("pin",pin).maybeSingle();
+        if(data){await db.usuarios.put({...data,synced:true});return data;}
       }
-      const local = await db.usuarios.get(codigo);
-      return (local && local.pin===pin) ? local : null;
+      const local=await db.usuarios.get(codigo);
+      return (local&&local.pin===pin)?local:null;
     }
-    async function seedUsuarios(){
+    async function seed(){
       if(await db.usuarios.count()===0){
         await db.usuarios.bulkPut([
           {id:"ADMIN",pin:"1234",rol:"admin",synced:false},
@@ -260,444 +199,556 @@
         ]);
       }
     }
-    async function sincronizar(){
-      if(!supabase||!state.online){ toast("Sin conexión","warn"); return; }
-      try{
-        for(const t of ["productos","compras","envios","usuarios"]){
-          const pend = (await db[t].toArray()).filter(r=>!r.synced);
-          for(const r of pend){
-            const {synced,...row}=r;
-            await supabase.from(t).upsert(row);
-            await db[t].put({...r,synced:true});
-          }
-        }
-        state.lastSync = new Date().toISOString();
-        toast("Sincronizado","ok");
-        render();
-      }catch(e){ toast("Error sync","err"); }
+    async function getConfig(key,def=""){
+      const r=await db.config.get(key);
+      return r?r.value:def;
+    }
+    async function setConfig(key,value){
+      await db.config.put({key,value});
     }
 
-    // ============================================================
-    // RENDER
-    // ============================================================
+    // ===================== BÚSQUEDA COINCIDENCIAS =====================
+    async function buscarCoincidencias(texto){
+      if(!texto||texto.length<2) return [];
+      const t=texto.toLowerCase().trim();
+      const prods=await db.productos.toArray();
+      const results=[];
+      for(const p of prods){
+        const nombre=(p.nombre||"").toLowerCase();
+        const codigo=(p.codigo||"").toLowerCase();
+        let score=0;
+        if(codigo===t) score=100;
+        else if(nombre===t) score=90;
+        else if(nombre.includes(t)||t.includes(nombre)) score=70;
+        else {
+          // sinónimos
+          for(const [k,vals] of Object.entries(SINONIMOS)){
+            if((nombre.includes(k)||vals.some(v=>nombre.includes(v))) && (t.includes(k)||vals.some(v=>t.includes(v)))) score=60;
+          }
+        }
+        if(score>0) results.push({...p,score});
+      }
+      return results.sort((a,b)=>b.score-a.score).slice(0,5);
+    }
+
+    // ===================== RENDER =====================
     function render(){
-      const app = $("#app");
-      app.innerHTML = "";
-      if(state.view==="login"){ app.appendChild(renderLogin()); return; }
+      const app=$("#app");
+      app.innerHTML="";
+      if(state.view==="login"){app.appendChild(renderLogin());return;}
       app.appendChild(renderHeader());
-      const main = el("main",{class:"pb-20 max-w-md mx-auto px-4 py-3"});
+      const main=el("main",{class:"pb-16 max-w-md mx-auto px-3 py-2"});
       if(state.user.rol==="admin"){
         if(state.view==="registro") main.appendChild(renderRegistro());
         else if(state.view==="reportes") main.appendChild(renderReportes());
-        else if(state.view==="config") main.appendChild(renderConfig());
-      } else {
-        if(state.view==="recibir") main.appendChild(renderRecibir());
         else if(state.view==="consultar") main.appendChild(renderConsultar());
+        else main.appendChild(renderConfig());
+      } else {
+        if(state.view==="consultar") main.appendChild(renderConsultar());
+        else main.appendChild(renderRecibir());
       }
       app.appendChild(main);
       app.appendChild(renderNav());
     }
 
     function renderHeader(){
-      const h = el("header",{class:"bg-brand-900 text-white sticky top-0 z-40 shadow"});
-      const inner = el("div",{class:"max-w-md mx-auto px-4 py-3 flex justify-between items-center"});
+      const h=el("header",{class:"bg-brand-900 text-white sticky top-0 z-40"});
+      const inner=el("div",{class:"max-w-md mx-auto px-3 py-2 flex justify-between items-center"});
       inner.appendChild(el("div",{class:"flex items-center gap-2"},
-        el("span",{class:"font-bold text-lg"},"📦 MM"),
-        el("span",{class:"text-xs bg-brand-500 px-2 py-0.5 rounded-full"},state.user.id)
+        el("span",{class:"font-bold"},"📦 MM"),
+        el("span",{class:"text-[10px] bg-brand-500 px-2 py-0.5 rounded-full"},state.user.id)
       ));
-      const right = el("div",{class:"flex gap-2"});
-      right.appendChild(el("button",{class:"text-xs bg-white/20 px-3 py-1 rounded-lg",onclick:sincronizar},"↻"));
-      right.appendChild(el("button",{class:"text-xs bg-white/20 px-3 py-1 rounded-lg",onclick:()=>{state.user=null;state.view="login";render();}},"Salir"));
+      const right=el("div",{class:"flex gap-1.5"});
+      right.appendChild(el("button",{class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg",onclick:()=>toast("Sync manual","ok")},"↻"));
+      right.appendChild(el("button",{class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg",onclick:()=>{state.user=null;state.view="login";render();}},"Salir"));
       inner.appendChild(right);
       h.appendChild(inner);
       return h;
     }
 
     function renderNav(){
-      const nav = el("nav",{class:"fixed bottom-0 inset-x-0 bg-white border-t shadow z-40"});
-      const wrap = el("div",{class:"max-w-md mx-auto grid grid-cols-3"});
-      const tabs = state.user.rol==="admin"
-        ? [["registro","Registro","📦"],["reportes","Reportes","📊"],["config","Config","⚙️"]]
-        : [["recibir","Recibir","📥"],["consultar","Consultar","🔍"],["mermas","Mermas","⚠️"]];
+      const nav=el("nav",{class:"fixed bottom-0 inset-x-0 bg-white border-t z-40"});
+      const wrap=el("div",{class:"max-w-md mx-auto grid grid-cols-4"});
+      const tabs=state.user.rol==="admin"
+        ? [["registro","Registro","📦"],["consultar","Precios","🔍"],["reportes","Reportes","📊"],["config","Config","⚙️"]]
+        : [["consultar","Precios","🔍"],["recibir","Recibir","📥"],["mermas","Mermas","⚠️"]];
       tabs.forEach(([v,l,i])=>{
-        const active = state.view===v;
-        wrap.appendChild(el("button",{
-          class:"flex flex-col items-center py-2.5 "+(active?"text-brand-600":"text-slate-400"),
-          onclick:()=>{state.view=v;render();}
-        }, el("span",{class:"text-xl"},i), el("span",{class:"text-[11px]"},l)));
+        const active=state.view===v;
+        wrap.appendChild(el("button",{class:`flex flex-col items-center py-2 ${active?"text-brand-600":"text-slate-400"}`,onclick:()=>{state.view=v;render();}},
+          el("span",{class:"text-lg"},i),el("span",{class:"text-[10px]"},l)));
       });
       nav.appendChild(wrap);
       return nav;
     }
 
     function renderLogin(){
-      const w = el("div",{class:"min-h-screen flex items-center justify-center bg-gradient-to-b from-brand-900 to-brand-700 px-6"});
-      const card = el("div",{class:"bg-white rounded-3xl p-7 w-full max-w-sm shadow-2xl"});
-      card.innerHTML = `
-        <div class="text-center mb-6">
-          <div class="text-5xl mb-2">📦</div>
-          <h1 class="text-2xl font-extrabold">Distribución MM</h1>
-        </div>
-        <input id="li-codigo" class="w-full mb-3 px-4 py-3 rounded-xl border uppercase outline-none" placeholder="Código (ADMIN / M1)" />
-        <input id="li-pin" type="password" maxlength="4" inputmode="numeric" class="w-full mb-4 px-4 py-3 rounded-xl border text-center text-lg outline-none" placeholder="PIN" />
-        <button id="li-btn" class="w-full bg-brand-600 text-white py-3.5 rounded-xl font-bold">Entrar</button>
-        <p class="text-xs text-center text-slate-400 mt-3">ADMIN/1234 · M1/1111</p>`;
+      const w=el("div",{class:"min-h-screen flex items-center justify-center bg-gradient-to-b from-brand-900 to-brand-700 px-6"});
+      const card=el("div",{class:"bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl"});
+      card.innerHTML=`
+        <div class="text-center mb-5"><div class="text-4xl mb-1">📦</div><h1 class="text-xl font-extrabold">Distribución MM</h1></div>
+        <input id="li-codigo" class="w-full mb-2 px-3 py-2.5 rounded-xl border uppercase outline-none text-sm" placeholder="Código" />
+        <input id="li-pin" type="password" maxlength="4" inputmode="numeric" class="w-full mb-3 px-3 py-2.5 rounded-xl border text-center outline-none" placeholder="PIN" />
+        <button id="li-btn" class="w-full bg-brand-600 text-white py-3 rounded-xl font-bold">Entrar</button>
+        <p class="text-[10px] text-center text-slate-400 mt-2">ADMIN/1234 · M1/1111</p>`;
       w.appendChild(card);
       setTimeout(()=>{
-        $("#li-btn").onclick = async ()=>{
-          const u = await login($("#li-codigo").value, $("#li-pin").value);
-          if(u){ state.user=u; state.view=u.rol==="admin"?"registro":"recibir"; render(); toast("Bienvenido "+u.id); }
+        $("#li-btn").onclick=async()=>{
+          const u=await login($("#li-codigo").value,$("#li-pin").value);
+          if(u){state.user=u;state.view=u.rol==="admin"?"registro":"consultar";render();toast("Bienvenido "+u.id);}
           else toast("Credenciales incorrectas","err");
         };
       },0);
       return w;
     }
 
-    // ============================================================
-    // REGISTRO DE PRODUCTO (pantalla principal corregida)
-    // ============================================================
+    // ===================== REGISTRO (compacto) =====================
     function renderRegistro(){
-      const wrap = el("div",{class:"space-y-4 fade-in"});
-      wrap.appendChild(el("h2",{class:"text-xl font-bold text-brand-900"},"Registrar Producto"));
+      const wrap=el("div",{class:"space-y-2"});
+      const card=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2"});
 
-      const card = el("div",{class:"bg-white rounded-2xl p-4 shadow-sm space-y-3"});
-
-      // Fila foto + código + botón foto (derecha)
-      card.innerHTML = `
-        <div class="grid grid-cols-[4rem_1fr_3.5rem] gap-2 items-end">
-          <div id="foto-preview" class="w-16 h-16 rounded-xl bg-brand-50 border border-dashed border-brand-200 flex items-center justify-center text-2xl">📷</div>
-          <div>
-            <label class="text-xs font-semibold text-slate-600">Código</label>
-            <input id="p-codigo" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:border-brand-500 uppercase" placeholder="PROD-001" />
-          </div>
-          <label class="w-14 h-14 bg-brand-600 text-white rounded-xl flex items-center justify-center text-xl cursor-pointer">
-            📷
+      card.innerHTML=`
+        <!-- Foto + Código + Capturar -->
+        <div class="grid grid-cols-[3.5rem_1fr_auto] gap-2 items-center">
+          <div id="foto-preview" class="w-14 h-14 rounded-lg bg-slate-100 border border-dashed border-slate-300 flex items-center justify-center text-[10px] text-slate-400 font-medium">FOTO</div>
+          <input id="p-codigo" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none uppercase" placeholder="Código" />
+          <label class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap">Capturar
             <input id="foto-input" type="file" accept="image/*" capture="environment" class="hidden" />
           </label>
         </div>
 
-        <div>
-          <label class="text-xs font-semibold text-slate-600">Nombre</label>
-          <input id="p-nombre" class="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:border-brand-500" placeholder="Nombre del producto" />
+        <!-- Nombre + Dictar -->
+        <div class="grid grid-cols-[1fr_auto] gap-2 items-center">
+          <input id="p-nombre" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none" placeholder="Nombre del producto" />
+          <button id="btn-dictar-nombre" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-semibold whitespace-nowrap">🎙 Dictar</button>
         </div>
+        <div id="coincidencias" class="hidden text-xs bg-amber-50 border border-amber-200 rounded-lg p-2"></div>
 
-        <!-- Cantidades + Dictado (botón derecha) -->
-        <div class="grid grid-cols-[1fr_1fr_1fr_3.5rem] gap-2 items-end">
-          <div>
-            <label class="text-xs font-semibold text-slate-600">Paquetes</label>
-            <input id="p-paquetes" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border text-center outline-none" />
-          </div>
-          <div>
-            <label class="text-xs font-semibold text-slate-600">Pz/Paq</label>
-            <input id="p-ppp" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border text-center outline-none" />
-          </div>
-          <div>
-            <label class="text-xs font-semibold text-slate-600">Sueltas</label>
-            <input id="p-sueltas" type="number" value="0" class="w-full mt-1 px-2 py-2.5 rounded-xl border text-center outline-none" />
-          </div>
-          <button id="btn-dictar-cant" class="w-14 h-14 bg-brand-600 text-white rounded-xl text-xs font-semibold leading-tight">🎙<br>Dictar</button>
+        <!-- Cantidades -->
+        <div class="grid grid-cols-[1fr_1fr_1fr_auto] gap-1.5 items-end">
+          <div><label class="text-[10px] text-slate-500">Paquetes</label><input id="p-paquetes" type="number" value="0" class="w-full px-1.5 py-1.5 rounded-lg border text-center text-sm" /></div>
+          <div><label class="text-[10px] text-slate-500">Pz/Paq</label><input id="p-ppp" type="number" value="0" class="w-full px-1.5 py-1.5 rounded-lg border text-center text-sm" /></div>
+          <div><label class="text-[10px] text-slate-500">Sueltas</label><input id="p-sueltas" type="number" value="0" class="w-full px-1.5 py-1.5 rounded-lg border text-center text-sm" /></div>
+          <button id="btn-dictar-cant" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-semibold">🎙 Dictar</button>
         </div>
-        <div id="p-total" class="text-sm font-semibold bg-brand-50 text-brand-800 rounded-lg px-3 py-2">Total piezas: 0</div>
-        <div id="dictar-cant-status" class="hidden text-center text-sm text-brand-600 animate-pulse">🎙️ Escuchando cantidades...</div>
+        <div id="p-total" class="text-xs font-semibold bg-brand-50 text-brand-800 rounded-lg px-2 py-1.5">Total: 0 pz</div>
 
-        <!-- Distribución M C R + Dictado -->
-        <div class="border-t border-brand-100 pt-3">
-          <div class="flex justify-between items-center mb-2">
-            <b class="text-sm text-brand-900">Distribución</b>
-            <button id="btn-dictar-dist" class="w-14 h-14 bg-brand-600 text-white rounded-xl text-xs font-semibold leading-tight">🎙<br>Dictar</button>
-          </div>
-          <div class="grid grid-cols-3 gap-2">
-            <div class="bg-brand-50 border border-brand-100 rounded-2xl p-2">
-              <b class="block text-center text-brand-900">M</b>
-              <label class="text-[10px] text-slate-500">Paquetes</label>
-              <input id="d-M-paq" type="number" value="0" class="w-full border rounded-lg p-2 text-center text-sm" />
-              <label class="text-[10px] text-slate-500">Piezas</label>
-              <input id="d-M-pzs" type="number" value="0" class="w-full border rounded-lg p-2 text-center text-sm" />
-            </div>
-            <div class="bg-brand-50 border border-brand-100 rounded-2xl p-2">
-              <b class="block text-center text-brand-900">C</b>
-              <label class="text-[10px] text-slate-500">Paquetes</label>
-              <input id="d-C-paq" type="number" value="0" class="w-full border rounded-lg p-2 text-center text-sm" />
-              <label class="text-[10px] text-slate-500">Piezas</label>
-              <input id="d-C-pzs" type="number" value="0" class="w-full border rounded-lg p-2 text-center text-sm" />
-            </div>
-            <div class="bg-brand-50 border border-brand-100 rounded-2xl p-2">
-              <b class="block text-center text-brand-900">R</b>
-              <label class="text-[10px] text-slate-500">Paquetes</label>
-              <input id="d-R-paq" type="number" value="0" class="w-full border rounded-lg p-2 text-center text-sm" />
-              <label class="text-[10px] text-slate-500">Piezas</label>
-              <input id="d-R-pzs" type="number" value="0" class="w-full border rounded-lg p-2 text-center text-sm" />
+        <!-- Distribución -->
+        <div class="flex justify-between items-center">
+          <span class="text-xs font-bold text-brand-900">Distribución</span>
+          <button id="btn-dictar-dist" class="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-xs font-semibold">🎙 Dictar</button>
+        </div>
+        <div class="grid grid-cols-3 gap-1.5 text-center">
+          <div class="bg-brand-50 rounded-lg p-1.5">
+            <div class="font-bold text-brand-700 text-sm">M</div>
+            <div class="flex gap-1 justify-center mt-1">
+              <input id="d-M-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" placeholder="PQ" />
+              <input id="d-M-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" placeholder="PZ" />
             </div>
           </div>
-          <p id="d-validacion" class="mt-2 text-sm font-medium text-amber-600">Falta distribuir</p>
-          <div id="dictar-dist-status" class="hidden text-center text-sm text-brand-600 animate-pulse">🎙️ Escuchando distribución...</div>
+          <div class="bg-brand-50 rounded-lg p-1.5">
+            <div class="font-bold text-brand-700 text-sm">C</div>
+            <div class="flex gap-1 justify-center mt-1">
+              <input id="d-C-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" placeholder="PQ" />
+              <input id="d-C-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" placeholder="PZ" />
+            </div>
+          </div>
+          <div class="bg-brand-50 rounded-lg p-1.5">
+            <div class="font-bold text-brand-700 text-sm">R</div>
+            <div class="flex gap-1 justify-center mt-1">
+              <input id="d-R-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" placeholder="PQ" />
+              <input id="d-R-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" placeholder="PZ" />
+            </div>
+          </div>
         </div>
+        <div id="d-validacion" class="text-xs font-medium text-amber-600">Falta distribuir</div>
 
-        <!-- Precio + Guardar (derecha) -->
-        <div class="grid grid-cols-[1fr_1fr_3.5rem] gap-2 items-end">
-          <div>
-            <label class="text-xs font-semibold text-slate-600">Precio</label>
-            <input id="p-precio" type="number" class="w-full mt-1 px-3 py-2.5 rounded-xl border outline-none" placeholder="0" />
-          </div>
-          <div>
-            <label class="text-xs font-semibold text-slate-600">Proveedor / Nota</label>
-            <input id="p-nota" class="w-full mt-1 px-3 py-2.5 rounded-xl border outline-none" placeholder="Opcional" />
-          </div>
-          <button id="btn-guardar" class="w-14 h-14 bg-brand-600 text-white rounded-xl font-bold text-xs leading-tight shadow">Guardar<br>Producto</button>
+        <!-- Precio + Proveedor + Nota + Guardar -->
+        <div class="grid grid-cols-[1fr_1fr_auto] gap-1.5 items-end">
+          <div><label class="text-[10px] text-slate-500">Precio</label><input id="p-precio" type="number" class="w-full px-2 py-1.5 rounded-lg border text-sm" placeholder="0" /></div>
+          <div><label class="text-[10px] text-slate-500">Proveedor</label><input id="p-proveedor" class="w-full px-2 py-1.5 rounded-lg border text-sm" placeholder="Proveedor" /></div>
+          <button id="btn-guardar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold leading-tight">Guardar<br>Producto</button>
         </div>
+        <div class="text-[10px] text-slate-500">Nota: <span id="p-nota-auto" class="font-semibold text-brand-700"></span> (provisional)</div>
       `;
       wrap.appendChild(card);
 
-      // Lista reciente
-      wrap.appendChild(el("h3",{class:"text-lg font-bold text-brand-900 mt-4"},"Registros recientes"));
-      const list = el("div",{id:"lista-reciente",class:"space-y-2"});
+      // Lista compacta
+      const listTitle=el("div",{class:"flex justify-between items-center mt-2"});
+      listTitle.appendChild(el("span",{class:"text-sm font-bold text-brand-900"},"Registros recientes"));
+      wrap.appendChild(listTitle);
+      const list=el("div",{id:"lista-reciente",class:"space-y-1 max-h-32 overflow-y-auto no-scrollbar"});
       wrap.appendChild(list);
 
-      let fotoBlob = null;
+      let fotoBlob=null;
+      let productoSeleccionado=null;
 
-      setTimeout(()=>{
-        const calc = ()=>{
-          const paq = +$("#p-paquetes").value||0;
-          const ppp = +$("#p-ppp").value||0;
-          const sue = +$("#p-sueltas").value||0;
-          const total = paq*ppp + sue;
-          $("#p-total").textContent = `Total piezas: ${total}`;
+      setTimeout(async()=>{
+        // Precargar proveedor y nota
+        const lastProv=await getConfig("last_proveedor","");
+        $("#p-proveedor").value=lastProv;
+        $("#p-nota-auto").textContent=hoyNota();
 
-          const dist = {
-            M:{paquetes:+$("#d-M-paq").value||0, piezas:+$("#d-M-pzs").value||0},
-            C:{paquetes:+$("#d-C-paq").value||0, piezas:+$("#d-C-pzs").value||0},
-            R:{paquetes:+$("#d-R-paq").value||0, piezas:+$("#d-R-pzs").value||0}
+        const calc=()=>{
+          const paq=+$("#p-paquetes").value||0;
+          const ppp=+$("#p-ppp").value||0;
+          const sue=+$("#p-sueltas").value||0;
+          const total=paq*ppp+sue;
+          $("#p-total").textContent=`Total: ${total} pz`;
+          const dist={
+            M:{paquetes:+$("#d-M-paq").value||0,piezas:+$("#d-M-pzs").value||0},
+            C:{paquetes:+$("#d-C-paq").value||0,piezas:+$("#d-C-pzs").value||0},
+            R:{paquetes:+$("#d-R-paq").value||0,piezas:+$("#d-R-pzs").value||0}
           };
-          const distTotal = UBICACIONES.reduce((s,u)=>s + dist[u].paquetes*ppp + dist[u].piezas, 0);
-          const val = $("#d-validacion");
-          if(distTotal > total) { val.textContent="Distribución supera el total"; val.className="mt-2 text-sm font-medium text-red-600"; }
-          else if(distTotal===total && total>0){ val.textContent="Distribución completa"; val.className="mt-2 text-sm font-medium text-emerald-600"; }
-          else { val.textContent="Falta distribuir"; val.className="mt-2 text-sm font-medium text-amber-600"; }
-          return {total, dist, ppp};
+          const distTotal=UBICACIONES.reduce((s,u)=>s+dist[u].paquetes*ppp+dist[u].piezas,0);
+          const val=$("#d-validacion");
+          if(distTotal>total){val.textContent="Supera el total";val.className="text-xs font-medium text-red-600";}
+          else if(distTotal===total&&total>0){val.textContent="Distribución completa";val.className="text-xs font-medium text-emerald-600";}
+          else{val.textContent="Falta distribuir";val.className="text-xs font-medium text-amber-600";}
+          return {total,dist,ppp,paq,sue};
         };
-        ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"]
-          .forEach(s=>$(s)?.addEventListener("input",calc));
+        ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(s=>$(s)?.addEventListener("input",calc));
+
+        // Coincidencias al escribir nombre o código
+        const mostrarCoincidencias=async(texto)=>{
+          const box=$("#coincidencias");
+          if(!texto||texto.length<2){box.classList.add("hidden");return;}
+          const coins=await buscarCoincidencias(texto);
+          if(!coins.length){box.classList.add("hidden");return;}
+          box.classList.remove("hidden");
+          box.innerHTML=coins.map(c=>`
+            <button data-id="${c.id}" class="block w-full text-left py-1 border-b border-amber-100 last:border-0 coincidencia">
+              <span class="font-semibold">${escapeHtml(c.nombre)}</span> <span class="text-slate-500">(${escapeHtml(c.codigo)})</span>
+            </button>
+          `).join("");
+          box.querySelectorAll(".coincidencia").forEach(btn=>{
+            btn.onclick=async()=>{
+              const p=await db.productos.get(btn.dataset.id);
+              if(p){
+                productoSeleccionado=p;
+                $("#p-codigo").value=p.codigo||"";
+                $("#p-nombre").value=p.nombre||"";
+                box.classList.add("hidden");
+                toast("Producto existente seleccionado");
+              }
+            };
+          });
+        };
+        $("#p-nombre").addEventListener("input",e=>mostrarCoincidencias(e.target.value));
+        $("#p-codigo").addEventListener("input",e=>mostrarCoincidencias(e.target.value));
 
         // Foto
-        $("#foto-input").onchange = async e=>{
-          const f = e.target.files[0]; if(!f) return;
-          fotoBlob = await procesarImagen(f);
-          $("#foto-preview").innerHTML = `<img src="${URL.createObjectURL(fotoBlob)}" class="w-16 h-16 rounded-xl object-cover">`;
+        $("#foto-input").onchange=async e=>{
+          const f=e.target.files[0]; if(!f) return;
+          fotoBlob=await procesarImagen(f);
+          $("#foto-preview").innerHTML=`<img src="${URL.createObjectURL(fotoBlob)}" class="w-14 h-14 rounded-lg object-cover">`;
         };
 
-        // Dictado cantidades
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        $("#btn-dictar-cant").onclick = ()=>{
-          if(!SR){ toast("Sin soporte de voz","err"); return; }
-          const r = new SR(); r.lang="es-MX";
-          $("#dictar-cant-status").classList.remove("hidden");
-          r.onresult = e=>{
-            const texto = e.results[0][0].transcript;
-            const res = parseCantidades(texto);
-            $("#dictar-cant-status").classList.add("hidden");
-            if(res.ok){
-              $("#p-paquetes").value = res.paquetes;
-              $("#p-ppp").value = res.ppp;
-              $("#p-sueltas").value = res.sueltas;
-              calc();
-              toast("Cantidades: "+res.total+" pz");
-            } else toast("No entendí: "+texto,"warn");
+        // Dictados
+        const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+        const dictar=(btnId,statusCb,handler)=>{
+          $(btnId).onclick=()=>{
+            if(!SR){toast("Sin soporte de voz","err");return;}
+            const r=new SR(); r.lang="es-MX";
+            statusCb(true);
+            r.onresult=e=>{statusCb(false);handler(e.results[0][0].transcript);};
+            r.onerror=()=>statusCb(false);
+            r.start();
           };
-          r.onerror = ()=>{$("#dictar-cant-status").classList.add("hidden"); toast("Error de voz","err");};
-          r.start();
         };
+        dictar("#btn-dictar-nombre",()=>{},texto=>{
+          $("#p-nombre").value=texto;
+          mostrarCoincidencias(texto);
+          toast("Nombre: "+texto);
+        });
+        dictar("#btn-dictar-cant",()=>{},texto=>{
+          const res=parseCantidades(texto);
+          if(res.ok){
+            $("#p-paquetes").value=res.paquetes;
+            $("#p-ppp").value=res.ppp;
+            $("#p-sueltas").value=res.sueltas;
+            calc();
+            toast(`Cantidades: ${res.total} pz`);
+          } else toast("No entendí cantidades","warn");
+        });
+        dictar("#btn-dictar-dist",()=>{},texto=>{
+          const {total}=calc();
+          const res=parseDistribucion(texto,total);
+          if(res.ok){
+            UBICACIONES.forEach(u=>{
+              $(`#d-${u}-paq`).value=res.distribucion[u].paquetes;
+              $(`#d-${u}-pzs`).value=res.distribucion[u].piezas;
+            });
+            calc();
+            toast("Distribución aplicada");
+          } else toast("No entendí distribución","warn");
+        });
 
-        // Dictado distribución
-        $("#btn-dictar-dist").onclick = ()=>{
-          if(!SR){ toast("Sin soporte de voz","err"); return; }
-          const r = new SR(); r.lang="es-MX";
-          $("#dictar-dist-status").classList.remove("hidden");
-          r.onresult = e=>{
-            const texto = e.results[0][0].transcript;
-            const {total, ppp} = calc();
-            const res = parseDistribucion(texto, total);
-            $("#dictar-dist-status").classList.add("hidden");
-            if(res.ok){
-              UBICACIONES.forEach(u=>{
-                $(`#d-${u}-paq`).value = res.distribucion[u].paquetes;
-                $(`#d-${u}-pzs`).value = res.distribucion[u].piezas;
-              });
-              calc();
-              toast("Distribución aplicada");
-            } else toast("No entendí distribución: "+texto,"warn");
-          };
-          r.onerror = ()=>{$("#dictar-dist-status").classList.add("hidden");};
-          r.start();
-        };
+        // Guardar
+        $("#btn-guardar").onclick=async()=>{
+          const nombre=$("#p-nombre").value.trim();
+          if(!nombre){toast("Nombre obligatorio","err");return;}
+          const {total,dist,ppp,paq,sue}=calc();
+          if(total<=0){toast("Indica cantidades","err");return;}
 
-        // Guardar Producto
-        $("#btn-guardar").onclick = async ()=>{
-          const codigo = $("#p-codigo").value.trim().toUpperCase();
-          const nombre = $("#p-nombre").value.trim();
-          if(!nombre){ toast("Nombre obligatorio","err"); return; }
-          const {total, dist, ppp} = calc();
-          if(total<=0){ toast("Indica cantidades","err"); return; }
+          const codigo=$("#p-codigo").value.trim().toUpperCase()||("P"+Date.now().toString().slice(-6));
+          const proveedor=$("#p-proveedor").value.trim();
+          const nota=hoyNota();
 
-          // Anti-duplicado
-          let prod = null;
-          if(codigo){
-            const found = await db.productos.where("codigo").equals(codigo).first();
-            if(found) prod = found;
+          // Guardar último proveedor
+          if(proveedor) await setConfig("last_proveedor",proveedor);
+
+          let prod=productoSeleccionado;
+          if(!prod){
+            // buscar otra vez
+            const coins=await buscarCoincidencias(nombre);
+            if(coins.length&&coins[0].score>=90) prod=coins[0];
           }
           if(!prod){
-            const found = await db.productos.filter(p=>p.nombre.toLowerCase()===nombre.toLowerCase()).first();
-            if(found) prod = found;
-          }
-
-          if(!prod){
-            prod = {
-              id: uid(),
-              codigo: codigo || ("P"+Date.now().toString().slice(-6)),
+            prod={
+              id:uid(),
+              codigo,
               nombre,
-              estado: "activo",
-              stock_total_bodega: total,
-              piezas_por_paquete: ppp,
-              precio_base: +$("#p-precio").value||null,
-              creado_en: new Date().toISOString(),
-              synced: false
+              estado:"activo",
+              stock_total_bodega:total,
+              piezas_por_paquete:ppp,
+              precio_base:+$("#p-precio").value||null,
+              creado_en:new Date().toISOString(),
+              synced:false
             };
           } else {
-            prod.stock_total_bodega = (prod.stock_total_bodega||0) + total;
-            prod.synced = false;
+            prod.stock_total_bodega=(prod.stock_total_bodega||0)+total;
+            prod.synced=false;
+            if(codigo&&codigo!==prod.codigo){
+              prod.sinonimos=prod.sinonimos||[];
+              if(!prod.sinonimos.includes(codigo)) prod.sinonimos.push(codigo);
+            }
           }
           await db.productos.put(prod);
 
-          let fUrl = null;
-          if(fotoBlob){ try{ fUrl = await subirImagen(fotoBlob);}catch(e){} }
+          let fUrl=null;
+          if(fotoBlob){try{fUrl=await subirImagen(fotoBlob);}catch(e){}}
 
-          // Siempre se crea registro de COMPRA (aparece en reporte aunque no se distribuya)
-          const compra = {
-            id: uid(),
-            producto_id: prod.id,
-            codigo: prod.codigo,
-            nombre: prod.nombre,
-            fecha: new Date().toISOString().slice(0,10),
-            proveedor: $("#p-nota").value.trim() || null,
-            nota: $("#p-nota").value.trim() || null,
-            foto_url: fUrl,
-            paquetes: +$("#p-paquetes").value||0,
-            piezas_por_paquete: ppp,
-            piezas_sueltas: +$("#p-sueltas").value||0,
-            total_piezas: total,
-            creado_en: new Date().toISOString(),
-            creado_por: state.user.id,
-            synced: false
+          // Siempre crear COMPRA (aparece en reporte)
+          const compra={
+            id:uid(),
+            producto_id:prod.id,
+            codigo:prod.codigo,
+            nombre:prod.nombre,
+            fecha:new Date().toISOString().slice(0,10),
+            proveedor,
+            nota,
+            foto_url:fUrl,
+            paquetes:paq,
+            piezas_por_paquete:ppp,
+            piezas_sueltas:sue,
+            total_piezas:total,
+            desglose: formatearDesglose(paq,ppp,sue),
+            creado_en:new Date().toISOString(),
+            creado_por:state.user.id,
+            synced:false
           };
           await db.compras.put(compra);
 
-          // Si hay distribución, crear envíos
-          let hayDist = false;
+          // Distribución
           for(const u of UBICACIONES){
-            const pz = dist[u].paquetes * ppp + dist[u].piezas;
+            const pz=dist[u].paquetes*ppp+dist[u].piezas;
             if(pz>0){
-              hayDist = true;
               await db.envios.put({
-                id: uid(),
-                producto_id: prod.id,
-                nombre: prod.nombre,
-                sucursal_destino: u,
-                cantidad_enviada: pz,
-                total_enviado_piezas: pz,
-                paquetes_enviados: dist[u].paquetes,
-                piezas_sueltas_enviadas: dist[u].piezas,
-                estado: "ENVIADO",
-                fecha_envio: new Date().toISOString(),
-                synced: false
+                id:uid(),
+                producto_id:prod.id,
+                nombre:prod.nombre,
+                sucursal_destino:u,
+                total_enviado_piezas:pz,
+                paquetes_enviados:dist[u].paquetes,
+                piezas_sueltas_enviadas:dist[u].piezas,
+                estado:"ENVIADO",
+                fecha_envio:new Date().toISOString(),
+                synced:false
               });
             }
           }
 
-          toast(hayDist ? "Producto guardado y distribuido" : "Producto guardado (pendiente de distribuir)");
-          // Limpiar formulario
-          ["p-codigo","p-nombre","p-paquetes","p-ppp","p-sueltas","p-precio","p-nota"].forEach(id=>$(`#${id}`).value = id.includes("paq")||id.includes("ppp")||id.includes("suel")?"0":"");
-          UBICACIONES.forEach(u=>{ $(`#d-${u}-paq`).value=0; $(`#d-${u}-pzs`).value=0; });
-          $("#foto-preview").innerHTML="📷";
+          toast("Producto guardado");
+          // limpiar (mantener proveedor)
+          $("#p-codigo").value="";
+          $("#p-nombre").value="";
+          $("#p-paquetes").value=0;
+          $("#p-ppp").value=0;
+          $("#p-sueltas").value=0;
+          $("#p-precio").value="";
+          UBICACIONES.forEach(u=>{$(`#d-${u}-paq`).value=0;$(`#d-${u}-pzs`).value=0;});
+          $("#foto-preview").innerHTML=`<span class="text-[10px] text-slate-400 font-medium">FOTO</span>`;
           fotoBlob=null;
+          productoSeleccionado=null;
           calc();
           cargarLista();
         };
 
+        function formatearDesglose(paq,ppp,sue){
+          if(paq>0&&ppp>0){
+            return sue>0 ? `${paq} PQ CON ${ppp} PZ + ${sue} = ${paq*ppp+sue} PZ` : `${paq} PQ CON ${ppp} PZ = ${paq*ppp} PZ`;
+          }
+          return `${sue||paq*ppp} PZ`;
+        }
+
         async function cargarLista(){
-          const compras = await db.compras.orderBy("creado_en").reverse().limit(15).toArray();
-          list.innerHTML = compras.length ? compras.map(c=>`
-            <div class="bg-white rounded-xl p-3 shadow-sm flex gap-3 items-center">
-              ${c.foto_url?`<img src="${c.foto_url}" class="w-12 h-12 rounded-lg object-cover">`:`<div class="w-12 h-12 rounded-lg bg-brand-50 flex items-center justify-center">📦</div>`}
+          const compras=await db.compras.orderBy("creado_en").reverse().limit(8).toArray();
+          list.innerHTML=compras.length?compras.map(c=>`
+            <div class="bg-white rounded-lg p-2 shadow-sm flex gap-2 items-center text-xs">
+              ${c.foto_url?`<img src="${c.foto_url}" class="w-9 h-9 rounded object-cover">`:`<div class="w-9 h-9 rounded bg-slate-100 flex items-center justify-center text-[10px]">📦</div>`}
               <div class="flex-1 min-w-0">
-                <p class="font-semibold text-sm truncate">${escapeHtml(c.nombre)}</p>
-                <p class="text-xs text-slate-500">${c.total_piezas} pz · ${c.fecha}</p>
+                <p class="font-semibold truncate">${escapeHtml(c.nombre)}</p>
+                <p class="text-slate-500">${c.desglose||(c.total_piezas+" pz")} · ${c.nota||""}</p>
               </div>
             </div>
-          `).join("") : `<p class="text-sm text-slate-400 text-center py-4">Sin registros</p>`;
+          `).join(""):`<p class="text-xs text-slate-400 text-center py-2">Sin registros</p>`;
         }
         cargarLista();
         calc();
       },0);
-
       return wrap;
     }
 
-    // ============================================================
-    // REPORTES (COMPRA ya funciona)
-    // ============================================================
-    function renderReportes(){
-      const wrap = el("div",{class:"space-y-4 fade-in"});
-      wrap.appendChild(el("h2",{class:"text-xl font-bold text-brand-900"},"Reportes"));
+    // ===================== CONSULTAR PRECIOS =====================
+    function renderConsultar(){
+      const wrap=el("div",{class:"space-y-2"});
+      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Consulta de precios"));
+      const search=el("input",{type:"text",id:"c-search",placeholder:"🔍 Nombre o código...",class:"w-full px-3 py-2 rounded-xl border text-sm outline-none"});
+      wrap.appendChild(search);
+      const list=el("div",{id:"c-list",class:"space-y-1.5"});
+      wrap.appendChild(list);
 
-      const tabs = el("div",{class:"flex gap-2"});
+      setTimeout(async()=>{
+        const prods=await db.productos.toArray();
+        const renderList=(q="")=>{
+          const filt=prods.filter(p=>!q||(p.nombre||"").toLowerCase().includes(q.toLowerCase())||(p.codigo||"").toLowerCase().includes(q.toLowerCase()));
+          list.innerHTML=filt.length?filt.map(p=>`
+            <div class="bg-white rounded-xl p-2.5 shadow-sm flex justify-between items-center">
+              <div class="min-w-0">
+                <p class="font-semibold text-sm truncate">${escapeHtml(p.nombre)}</p>
+                <p class="text-[10px] text-slate-500">${escapeHtml(p.codigo)}</p>
+              </div>
+              <p class="font-bold text-brand-600 text-sm">${p.precio_base!=null?"$"+Number(p.precio_base).toLocaleString("es-MX"):"—"}</p>
+            </div>
+          `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin resultados</p>`;
+        };
+        renderList();
+        search.oninput=()=>renderList(search.value);
+      },0);
+      return wrap;
+    }
+
+    // ===================== REPORTES + PDF =====================
+    function renderReportes(){
+      const wrap=el("div",{class:"space-y-2"});
+      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Reportes"));
+
+      const tabs=el("div",{class:"flex gap-1.5"});
       ["compra","traslado","diferencias"].forEach(t=>{
         tabs.appendChild(el("button",{
-          class:"px-4 py-2 rounded-full text-sm font-medium "+(state.rtab===t?"bg-brand-600 text-white":"bg-white shadow text-slate-600"),
-          onclick:()=>{state.rtab=t; render();}
-        }, t.toUpperCase()));
+          class:`px-3 py-1.5 rounded-full text-xs font-medium ${state.rtab===t?"bg-brand-600 text-white":"bg-white shadow text-slate-600"}`,
+          onclick:()=>{state.rtab=t;render();}
+        },t.toUpperCase()));
       });
       wrap.appendChild(tabs);
 
-      const body = el("div",{id:"rep-body",class:"mt-3 space-y-2"});
+      const body=el("div",{id:"rep-body",class:"mt-2 space-y-1.5"});
       wrap.appendChild(body);
 
-      setTimeout(async ()=>{
-        const tab = state.rtab || "compra";
+      setTimeout(async()=>{
+        const tab=state.rtab||"compra";
         if(tab==="compra"){
-          const compras = await db.compras.orderBy("fecha").reverse().toArray();
-          body.innerHTML = compras.length ? compras.map(c=>`
-            <div class="bg-white rounded-xl p-3 shadow-sm flex gap-3">
-              ${c.foto_url?`<img src="${c.foto_url}" class="w-14 h-14 rounded-lg object-cover">`:`<div class="w-14 h-14 bg-brand-50 rounded-lg flex items-center justify-center">📦</div>`}
-              <div class="flex-1">
-                <p class="font-bold text-sm">${escapeHtml(c.nombre)}</p>
-                <p class="text-xs text-slate-500">${c.total_piezas} piezas · ${c.fecha}</p>
-                <p class="text-xs text-slate-400">${c.proveedor||c.nota||""}</p>
+          const compras=await db.compras.orderBy("fecha").reverse().toArray();
+          // Agrupar por nota
+          const porNota={};
+          compras.forEach(c=>{
+            const k=c.nota||"SIN-NOTA";
+            if(!porNota[k]) porNota[k]={nota:k,proveedor:c.proveedor,fecha:c.fecha,items:[]};
+            porNota[k].items.push(c);
+          });
+
+          body.innerHTML=Object.values(porNota).map(g=>`
+            <div class="bg-white rounded-xl p-3 shadow-sm">
+              <div class="flex justify-between items-center mb-2">
+                <div>
+                  <p class="font-bold text-sm">COMPRA ${escapeHtml(g.nota)}</p>
+                  <p class="text-[10px] text-slate-500">${escapeHtml(g.proveedor||"Sin proveedor")} · ${g.fecha}</p>
+                </div>
+                <button data-nota="${g.nota}" class="btn-pdf px-2.5 py-1 bg-brand-600 text-white rounded-lg text-[10px] font-semibold">PDF</button>
               </div>
+              ${g.items.map(c=>`
+                <div class="flex gap-2 items-center py-1.5 border-t border-slate-100 text-xs">
+                  ${c.foto_url?`<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
+                  <div class="flex-1 min-w-0">
+                    <p class="font-semibold truncate">${escapeHtml(c.nombre)}</p>
+                    <p class="text-slate-500">${escapeHtml(c.codigo)} · ${c.desglose||c.total_piezas+" pz"}</p>
+                  </div>
+                </div>
+              `).join("")}
             </div>
-          `).join("") : `<p class="text-center text-slate-400 py-8">No hay compras registradas</p>`;
+          `).join("") || `<p class="text-xs text-slate-400 text-center py-6">No hay compras</p>`;
+
+          body.querySelectorAll(".btn-pdf").forEach(btn=>{
+            btn.onclick=()=>generarPDFCompra(btn.dataset.nota, porNota[btn.dataset.nota]);
+          });
         } else {
-          body.innerHTML = `<p class="text-center text-slate-400 py-8">Reporte ${tab} en construcción</p>`;
+          body.innerHTML=`<p class="text-xs text-slate-400 text-center py-6">Reporte ${tab} en construcción</p>`;
         }
       },0);
       return wrap;
     }
 
-    function renderConfig(){
-      return el("div",{class:"fade-in"}, el("h2",{class:"text-xl font-bold"},"Configuración"), el("p",{class:"text-sm text-slate-500 mt-2"},"Usuarios y ajustes"));
-    }
-    function renderRecibir(){
-      return el("div",{class:"fade-in"}, el("h2",{class:"text-xl font-bold"},"Recibir"), el("p",{class:"text-sm text-slate-500 mt-2"},"Confirmación de lote con una sola firma"));
-    }
-    function renderConsultar(){
-      return el("div",{class:"fade-in"}, el("h2",{class:"text-xl font-bold"},"Consultar"));
+    function generarPDFCompra(nota, grupo){
+      const w=window.open("","_blank");
+      if(!w){toast("Permite ventanas emergentes","warn");return;}
+      const filas=grupo.items.map(c=>`
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">
+            ${c.foto_url?`<img src="${c.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">`:"📦"}
+          </td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">
+            <b>${escapeHtml(c.nombre)}</b><br>
+            <span style="color:#64748b;font-size:12px;">${escapeHtml(c.codigo)}</span>
+          </td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-size:13px;">
+            ${escapeHtml(c.desglose||(c.total_piezas+" pz"))}
+          </td>
+        </tr>
+      `).join("");
+
+      w.document.write(`
+        <!DOCTYPE html><html><head><title>COMPRA ${nota}</title>
+        <style>
+          body{font-family:Arial,sans-serif;padding:24px;color:#0f172a;}
+          h1{font-size:20px;margin:0 0 4px;}
+          .meta{color:#64748b;font-size:13px;margin-bottom:20px;}
+          table{width:100%;border-collapse:collapse;}
+          th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}
+        </style></head><body>
+          <h1>COMPRA ${escapeHtml(nota)}</h1>
+          <div class="meta">Proveedor: <b>${escapeHtml(grupo.proveedor||"—")}</b> &nbsp;·&nbsp; Fecha: ${grupo.fecha}</div>
+          <table>
+            <thead><tr><th>Foto</th><th>Producto</th><th>Cantidad</th></tr></thead>
+            <tbody>${filas}</tbody>
+          </table>
+          <script>setTimeout(()=>window.print(),400);<\/script>
+        </body></html>
+      `);
+      w.document.close();
     }
 
-    // ============================================================
-    // INIT
-    // ============================================================
+    function renderConfig(){
+      return el("div",{class:"p-2"},el("p",{class:"text-sm text-slate-500"},"Configuración de usuarios y notas pendientes."));
+    }
+    function renderRecibir(){
+      return el("div",{class:"p-2"},el("p",{class:"text-sm text-slate-500"},"Recepción con una sola firma (próxima iteración)."));
+    }
+
+    // ===================== INIT =====================
     async function init(){
-      await seedUsuarios();
-      window.addEventListener("online",()=>{state.online=true;render();});
-      window.addEventListener("offline",()=>{state.online=false;render();});
+      await seed();
+      window.addEventListener("online",()=>{state.online=true;});
+      window.addEventListener("offline",()=>{state.online=false;});
       render();
     }
     init();
