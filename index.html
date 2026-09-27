@@ -40,11 +40,13 @@
     let supabase = null;
     try { if (window.supabase) supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch(e){}
 
-    const db = new Dexie("BodegaMM_v6");
+    // BASE FIJA - NO CAMBIAR NOMBRE
+    const db = new Dexie("BodegaMM");
     db.version(1).stores({
       productos: "id, codigo, nombre, estado, synced",
       compras: "id, producto_id, fecha, nota, creado_en, synced",
       envios: "id, producto_id, sucursal_destino, estado, synced",
+      recepciones: "id, producto_id, usuario_id, fecha, synced",
       usuarios: "id, pin, rol, synced",
       config: "key"
     });
@@ -69,6 +71,7 @@
       const d=new Date();
       return "P"+String(d.getFullYear()).slice(2)+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0");
     };
+    const fmtMoney = n => n!=null && n!=="" ? "$"+Number(n).toLocaleString("es-MX") : "Pendiente";
 
     function toast(msg,type="ok"){
       state.toast={msg,type};
@@ -141,7 +144,7 @@
     }
 
     async function procesarImagen(file){
-      return new Promise((resolve)=>{
+      return new Promise(resolve=>{
         const reader=new FileReader();
         reader.onload=e=>{
           const img=new Image();
@@ -176,8 +179,7 @@
       return (local&&local.pin===pin)?local:null;
     }
     async function seed(){
-      const count=await db.usuarios.count();
-      if(count===0){
+      if(await db.usuarios.count()===0){
         await db.usuarios.bulkPut([
           {id:"ADMIN",pin:"1234",rol:"admin",synced:false},
           {id:"M1",pin:"1111",rol:"sucursal",synced:false},
@@ -205,7 +207,8 @@
         else main.appendChild(renderConfig());
       } else {
         if(state.view==="consultar") main.appendChild(renderConsultar());
-        else main.appendChild(renderRecibir());
+        else if(state.view==="recibir") main.appendChild(renderRecibir());
+        else main.appendChild(renderConsultar());
       }
       app.appendChild(main);
       app.appendChild(renderNav());
@@ -228,14 +231,14 @@
 
     function renderNav(){
       const nav=el("nav",{class:"fixed bottom-0 inset-x-0 bg-white border-t z-40"});
-      const wrap=el("div",{class:"max-w-md mx-auto grid grid-cols-4"});
+      const wrap=el("div",{class:"max-w-md mx-auto grid "+(state.user.rol==="admin"?"grid-cols-4":"grid-cols-2")});
       const tabs=state.user.rol==="admin"
         ? [["registro","Registro","📦"],["consultar","Precios","🔍"],["reportes","Reportes","📊"],["config","Config","⚙️"]]
         : [["consultar","Precios","🔍"],["recibir","Recibir","📥"]];
       tabs.forEach(([v,l,i])=>{
         const active=state.view===v;
         wrap.appendChild(el("button",{class:`flex flex-col items-center py-2 ${active?"text-brand-600":"text-slate-400"}`,onclick:()=>{state.view=v;render();}},
-          el("span",{class:"text-lg"},i), el("span",{class:"text-[10px]"},l)));
+          el("span",{class:"text-lg"},i),el("span",{class:"text-[10px]"},l)));
       });
       nav.appendChild(wrap);
       return nav;
@@ -261,7 +264,7 @@
       return w;
     }
 
-    // ===================== REGISTRO =====================
+    // ===================== REGISTRO (ADMIN) =====================
     function renderRegistro(){
       const wrap=el("div",{class:"space-y-2"});
       const card=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2.5"});
@@ -283,18 +286,29 @@
 
         <div>
           <div class="text-[11px] font-semibold text-slate-600 mb-1">Cantidades</div>
-          <div class="grid grid-cols-[1fr_1fr_1fr_auto] gap-1.5 items-center">
-            <input id="p-paquetes" type="number" value="0" class="px-1.5 py-2 rounded-lg border text-center text-sm font-semibold" placeholder="PQ" />
-            <input id="p-ppp" type="number" value="0" class="px-1.5 py-2 rounded-lg border text-center text-sm" placeholder="Pz/Pq" />
-            <input id="p-sueltas" type="number" value="0" class="px-1.5 py-2 rounded-lg border text-center text-sm" placeholder="Sueltas" />
-            <button id="btn-dictar-cant" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg">🎙</button>
+          <div class="grid grid-cols-3 gap-2 mb-1">
+            <div class="text-center">
+              <div class="text-[10px] text-slate-500 mb-0.5">Paquetes</div>
+              <input id="p-paquetes" type="number" value="0" class="w-full px-1 py-2 rounded-lg border text-center text-sm font-bold" />
+            </div>
+            <div class="text-center">
+              <div class="text-[10px] text-slate-500 mb-0.5">Pz / Paq</div>
+              <input id="p-ppp" type="number" value="0" class="w-full px-1 py-2 rounded-lg border text-center text-sm font-bold" />
+            </div>
+            <div class="text-center">
+              <div class="text-[10px] text-slate-500 mb-0.5">Sueltas</div>
+              <input id="p-sueltas" type="number" value="0" class="w-full px-1 py-2 rounded-lg border text-center text-sm font-bold" />
+            </div>
           </div>
-          <div id="p-total" class="text-xs font-semibold bg-brand-50 text-brand-800 rounded-lg px-2.5 py-1.5 mt-1.5">Total: 0 pz</div>
+          <div class="flex items-center gap-2">
+            <div id="p-total" class="flex-1 text-xs font-semibold bg-brand-50 text-brand-800 rounded-lg px-2.5 py-1.5">Total: 0 pz</div>
+            <button id="btn-dictar-cant" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg shrink-0">🎙</button>
+          </div>
         </div>
 
         <div>
           <div class="flex justify-between items-center mb-1">
-            <span class="text-[11px] font-semibold text-slate-600">Distribución</span>
+            <span class="text-[11px] font-semibold text-slate-600">Distribución (solo Admin ve esto)</span>
             <button id="btn-dictar-dist" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg">🎙</button>
           </div>
           <div class="grid grid-cols-3 gap-1.5">
@@ -334,12 +348,12 @@
           </div>
           <button id="btn-guardar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold leading-tight h-[42px]">Guardar<br>Producto</button>
         </div>
-        <div class="text-[10px] text-slate-500">Nota: <span id="p-nota-auto" class="font-semibold text-brand-700"></span> (provisional)</div>
+        <div class="text-[10px] text-slate-500">Nota: <span id="p-nota-auto" class="font-semibold text-brand-700"></span></div>
       `;
       wrap.appendChild(card);
 
       wrap.appendChild(el("div",{class:"text-sm font-bold text-brand-900 mt-1"},"Registros recientes"));
-      const list=el("div",{id:"lista-reciente",class:"space-y-1 max-h-40 overflow-y-auto no-scrollbar"});
+      const list=el("div",{id:"lista-reciente",class:"space-y-1 max-h-36 overflow-y-auto no-scrollbar"});
       wrap.appendChild(list);
 
       let fotoBlob=null;
@@ -348,7 +362,6 @@
         $("#p-proveedor").value=await getConfig("last_proveedor","");
         $("#p-nota-auto").textContent=hoyNota();
 
-        // Ceros desaparecen al focus
         ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(sel=>{
           const inp=$(sel); if(!inp) return;
           inp.addEventListener("focus",()=>{if(inp.value==="0")inp.value="";});
@@ -375,7 +388,6 @@
         };
         ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(s=>$(s)?.addEventListener("input",calc));
 
-        // Foto
         const fotoBox=$("#foto-box");
         let longPress=null;
         fotoBox.onclick=()=>$("#foto-input").click();
@@ -397,40 +409,34 @@
           fotoBox.className="w-[4.5rem] h-[4.5rem] rounded-xl overflow-hidden cursor-pointer";
         };
 
-        // Dictados independientes + confirmación clara
         const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
         const dictar=(btn,handler)=>{
           $(btn).onclick=()=>{
             if(!SR){toast("Sin soporte de voz","err");return;}
             const r=new SR(); r.lang="es-MX";
-            r.onresult=e=>{
-              const texto=e.results[0][0].transcript;
-              handler(texto);
-            };
-            r.onerror=()=>{}; // silenciar errores si ya hubo resultado
+            r.onresult=e=>handler(e.results[0][0].transcript);
+            r.onerror=()=>{};
             r.start();
           };
         };
 
-        dictar("#btn-dictar-nc", texto=>{
+        dictar("#btn-dictar-nc",texto=>{
           const {nombre,codigo}=parseNombreCodigo(texto);
           $("#p-nombre").value=nombre;
           $("#p-codigo").value=codigo;
-          toast(codigo ? `Entendí: ${nombre} · ${codigo}` : `Entendí: ${nombre}`);
+          toast(codigo?`Entendí: ${nombre} · ${codigo}`:`Entendí: ${nombre}`);
         });
-
-        dictar("#btn-dictar-cant", texto=>{
+        dictar("#btn-dictar-cant",texto=>{
           const res=parseCantidades(texto);
           if(res.ok){
             $("#p-paquetes").value=res.paquetes;
             $("#p-ppp").value=res.ppp;
             $("#p-sueltas").value=res.sueltas;
             calc();
-            toast(`Entendí: ${res.paquetes} paquetes con ${res.ppp} pz` + (res.sueltas?` + ${res.sueltas} sueltas`:"") );
-          } else toast("No entendí las cantidades","warn");
+            toast(`Entendí: ${res.paquetes} pq × ${res.ppp} pz`+(res.sueltas?` + ${res.sueltas}`:""));
+          } else toast("No entendí cantidades","warn");
         });
-
-        dictar("#btn-dictar-dist", texto=>{
+        dictar("#btn-dictar-dist",texto=>{
           const {total}=calc();
           const res=parseDistribucion(texto,total);
           if(res.ok){
@@ -440,10 +446,9 @@
             });
             calc();
             toast("Distribución aplicada");
-          } else toast("No entendí la distribución","warn");
+          } else toast("No entendí distribución","warn");
         });
 
-        // Guardar
         $("#btn-guardar").onclick=async()=>{
           const nombre=$("#p-nombre").value.trim();
           if(!nombre){toast("Nombre obligatorio","err");return;}
@@ -476,7 +481,7 @@
           }
 
           let fUrl=null;
-          if(fotoBlob){ try{fUrl=await subirImagen(fotoBlob);}catch(e){} }
+          if(fotoBlob){try{fUrl=await subirImagen(fotoBlob);}catch(e){}}
           if(fUrl) prod.foto_url=fUrl;
           await db.productos.put(prod);
 
@@ -484,7 +489,6 @@
             ? (sue>0?`${paq} PQ CON ${ppp} PZ + ${sue} = ${total} PZ`:`${paq} PQ CON ${ppp} PZ = ${total} PZ`)
             : `${total} PZ`;
 
-          // Resumen de distribución para mostrar en app
           const distTxt=UBICACIONES.map(u=>{
             const d=dist[u];
             const pz=d.paquetes*ppp+d.piezas;
@@ -525,12 +529,8 @@
         };
 
         async function cargarLista(){
-          const compras=await db.compras.orderBy("creado_en").reverse().limit(15).toArray();
-          if(!compras.length){
-            list.innerHTML=`<p class="text-xs text-slate-400 text-center py-4">Sin registros aún</p>`;
-            return;
-          }
-          list.innerHTML=compras.map(c=>`
+          const compras=await db.compras.orderBy("creado_en").reverse().limit(20).toArray();
+          list.innerHTML=compras.length?compras.map(c=>`
             <div class="bg-white rounded-lg p-2 shadow-sm flex gap-2 items-center text-xs" data-id="${c.id}">
               ${c.foto_url?`<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
               <div class="flex-1 min-w-0">
@@ -538,22 +538,7 @@
                 <p class="text-slate-500">${c.desglose||c.total_piezas+" pz"}${c.dist_resumen?" · "+c.dist_resumen:""}</p>
               </div>
             </div>
-          `).join("");
-
-          list.querySelectorAll("[data-id]").forEach(row=>{
-            let t;
-            row.addEventListener("touchstart",()=>{
-              t=setTimeout(async()=>{
-                if(confirm("¿Eliminar este registro?")){
-                  await db.compras.delete(row.dataset.id);
-                  toast("Eliminado");
-                  cargarLista();
-                }
-              },700);
-            });
-            row.addEventListener("touchend",()=>clearTimeout(t));
-            row.addEventListener("touchmove",()=>clearTimeout(t));
-          });
+          `).join(""):`<p class="text-xs text-slate-400 text-center py-3">Sin registros</p>`;
         }
         await cargarLista();
         calc();
@@ -582,13 +567,108 @@
                 <p class="text-[10px] text-slate-500">${escapeHtml(p.codigo||"—")}</p>
               </div>
               <div class="text-right">
-                <p class="font-bold text-sm ${p.precio_base!=null?"text-brand-600":"text-amber-500"}">${p.precio_base!=null?"$"+Number(p.precio_base).toLocaleString("es-MX"):"Pendiente"}</p>
+                <p class="font-bold text-sm ${p.precio_base!=null?"text-brand-600":"text-amber-500"}">${fmtMoney(p.precio_base)}</p>
+                ${state.user.rol==="admin"?`<button data-id="${p.id}" class="edit-precio text-[10px] text-brand-600 font-semibold">Editar</button>`:""}
               </div>
             </div>
           `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin productos</p>`;
+
+          list.querySelectorAll(".edit-precio").forEach(btn=>{
+            btn.onclick=async()=>{
+              const p=await db.productos.get(btn.dataset.id);
+              const nuevo=prompt("Nuevo precio para "+p.nombre+":", p.precio_base??"");
+              if(nuevo===null) return;
+              p.precio_base=nuevo===""?null:+nuevo;
+              p.synced=false;
+              await db.productos.put(p);
+              toast("Precio actualizado");
+              render();
+            };
+          });
         };
         renderList();
         search.oninput=()=>renderList(search.value);
+      },0);
+      return wrap;
+    }
+
+    // ===================== RECIBIR (nuevo flujo) =====================
+    function renderRecibir(){
+      const wrap=el("div",{class:"space-y-2"});
+      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Reportar lo recibido"));
+      wrap.appendChild(el("p",{class:"text-xs text-slate-500"},"Indica solo la cantidad que realmente te llegó. No ves cuánto se distribuyó."));
+
+      const firmaBox=el("div",{class:"bg-brand-50 rounded-xl p-2.5 flex gap-2 items-center"});
+      firmaBox.innerHTML=`
+        <input id="firma" class="flex-1 px-3 py-2 rounded-lg border text-sm font-semibold uppercase outline-none" placeholder="Tu nombre (firma)" />
+        <button id="btn-confirmar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold whitespace-nowrap">Confirmar</button>
+      `;
+      wrap.appendChild(firmaBox);
+
+      const list=el("div",{id:"rec-list",class:"space-y-1.5"});
+      wrap.appendChild(list);
+
+      setTimeout(async()=>{
+        // Mostrar productos de compras recientes (sin cantidades de distribución)
+        const compras=await db.compras.orderBy("creado_en").reverse().limit(30).toArray();
+        // Agrupar por producto para no repetir
+        const vistos=new Set();
+        const items=[];
+        for(const c of compras){
+          if(vistos.has(c.producto_id||c.nombre)) continue;
+          vistos.add(c.producto_id||c.nombre);
+          items.push(c);
+        }
+
+        if(!items.length){
+          list.innerHTML=`<p class="text-xs text-slate-400 text-center py-8">No hay productos para reportar</p>`;
+          return;
+        }
+
+        list.innerHTML=items.map(c=>`
+          <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center" data-id="${c.producto_id||c.id}" data-nombre="${escapeHtml(c.nombre)}" data-codigo="${escapeHtml(c.codigo||"")}">
+            ${c.foto_url?`<img src="${c.foto_url}" class="w-12 h-12 rounded-lg object-cover">`:`<div class="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center">📦</div>`}
+            <div class="flex-1 min-w-0">
+              <p class="font-semibold text-sm truncate">${escapeHtml(c.nombre)}</p>
+              <p class="text-[10px] text-slate-500">${escapeHtml(c.codigo||"")}</p>
+            </div>
+            <input type="number" min="0" value="0" class="rec-qty w-16 px-2 py-1.5 rounded-lg border text-center text-sm font-bold" placeholder="0" />
+          </div>
+        `).join("");
+
+        // Ceros desaparecen al focus
+        list.querySelectorAll(".rec-qty").forEach(inp=>{
+          inp.addEventListener("focus",()=>{if(inp.value==="0")inp.value="";});
+          inp.addEventListener("blur",()=>{if(inp.value==="")inp.value="0";});
+        });
+
+        $("#btn-confirmar").onclick=async()=>{
+          const firma=$("#firma").value.trim().toUpperCase();
+          if(!firma){toast("Escribe tu nombre","err");return;}
+
+          const rows=list.querySelectorAll("[data-id]");
+          let guardados=0;
+          for(const row of rows){
+            const qty=+(row.querySelector(".rec-qty").value)||0;
+            if(qty<=0) continue;
+            await db.recepciones.put({
+              id:uid(),
+              producto_id:row.dataset.id,
+              codigo:row.dataset.codigo,
+              nombre:row.dataset.nombre,
+              usuario_id:state.user.id,
+              cantidad_recibida:qty,
+              firma,
+              fecha:new Date().toISOString().slice(0,10),
+              creado_en:new Date().toISOString(),
+              synced:false
+            });
+            guardados++;
+          }
+          if(guardados===0){toast("No indicaste ninguna cantidad","warn");return;}
+          toast(`Registrado: ${guardados} producto(s) · Firma: ${firma}`);
+          render();
+        };
       },0);
       return wrap;
     }
@@ -597,8 +677,8 @@
     function renderReportes(){
       const wrap=el("div",{class:"space-y-2"});
       wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Reportes"));
-      const tabs=el("div",{class:"flex gap-1.5"});
-      ["compra","traslado","diferencias"].forEach(t=>{
+      const tabs=el("div",{class:"flex gap-1.5 flex-wrap"});
+      ["compra","traslado","recepciones"].forEach(t=>{
         tabs.appendChild(el("button",{
           class:`px-3 py-1.5 rounded-full text-xs font-medium ${state.rtab===t?"bg-brand-600 text-white":"bg-white shadow text-slate-600"}`,
           onclick:()=>{state.rtab=t;render();}
@@ -610,6 +690,7 @@
 
       setTimeout(async()=>{
         const tab=state.rtab||"compra";
+
         if(tab==="compra"){
           const compras=await db.compras.orderBy("creado_en").reverse().toArray();
           const porNota={};
@@ -623,9 +704,9 @@
               <div class="flex justify-between items-center mb-2">
                 <div>
                   <p class="font-bold text-sm">COMPRA ${escapeHtml(g.nota)}</p>
-                  <p class="text-[10px] text-slate-500">${escapeHtml(g.proveedor||"Sin proveedor")} · ${g.fecha}</p>
+                  <p class="text-[10px] text-slate-500">${escapeHtml(g.proveedor||"—")} · ${g.fecha}</p>
                 </div>
-                <button data-nota="${g.nota}" class="btn-pdf px-2.5 py-1 bg-brand-600 text-white rounded-lg text-[10px] font-semibold">PDF</button>
+                <button data-nota="${g.nota}" class="btn-pdf-compra px-2.5 py-1 bg-brand-600 text-white rounded-lg text-[10px] font-semibold">PDF</button>
               </div>
               ${g.items.map(c=>`
                 <div class="flex gap-2 items-center py-1.5 border-t border-slate-100 text-xs">
@@ -640,30 +721,65 @@
             </div>
           `).join("")||`<p class="text-xs text-slate-400 text-center py-6">No hay compras</p>`;
 
-          body.querySelectorAll(".btn-pdf").forEach(btn=>{
+          body.querySelectorAll(".btn-pdf-compra").forEach(btn=>{
             btn.onclick=()=>generarPDFCompra(btn.dataset.nota,porNota[btn.dataset.nota]);
           });
         }
         else if(tab==="traslado"){
           const envios=await db.envios.where("estado").equals("ENVIADO").toArray();
-          // Agrupar por producto
           const porProd={};
           envios.forEach(e=>{
             const k=e.producto_id||e.nombre;
             if(!porProd[k]) porProd[k]={nombre:e.nombre,codigo:e.codigo,foto_url:e.foto_url,dist:[]};
             porProd[k].dist.push(`${e.sucursal_destino}:${e.total_enviado_piezas}pz`);
           });
-          body.innerHTML=Object.values(porProd).length?Object.values(porProd).map(p=>`
-            <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center text-xs">
-              ${p.foto_url?`<img src="${p.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
-              <div class="flex-1 min-w-0">
-                <p class="font-semibold truncate">${escapeHtml(p.nombre)}</p>
-                <p class="text-slate-500">${p.dist.join("   ")}</p>
+          const items=Object.values(porProd);
+          body.innerHTML=`
+            ${items.length?`<div class="flex justify-end mb-2"><button id="btn-pdf-traslado" class="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-xs font-semibold">PDF</button></div>`:""}
+            ${items.length?items.map(p=>`
+              <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center text-xs">
+                ${p.foto_url?`<img src="${p.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
+                <div class="flex-1 min-w-0">
+                  <p class="font-semibold truncate">${escapeHtml(p.nombre)}</p>
+                  <p class="text-slate-500">${p.dist.join("   ")}</p>
+                </div>
               </div>
-            </div>
-          `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Nada en tránsito</p>`;
+            `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Nada en tránsito</p>`}
+          `;
+          const btn=$("#btn-pdf-traslado");
+          if(btn) btn.onclick=()=>generarPDFTraslado(items);
         }
-        else body.innerHTML=`<p class="text-xs text-slate-400 text-center py-6">Diferencias (próximamente)</p>`;
+        else if(tab==="recepciones"){
+          // Admin ve lo que reportó cada usuario y detecta sobre-informe
+          const recepciones=await db.recepciones.orderBy("creado_en").reverse().toArray();
+          const compras=await db.compras.toArray();
+          const totalComprado={};
+          compras.forEach(c=>{
+            const k=c.producto_id||c.nombre;
+            totalComprado[k]=(totalComprado[k]||0)+(c.total_piezas||0);
+          });
+          const porProd={};
+          recepciones.forEach(r=>{
+            const k=r.producto_id||r.nombre;
+            if(!porProd[k]) porProd[k]={nombre:r.nombre,codigo:r.codigo,reportes:[],totalReportado:0};
+            porProd[k].reportes.push(`${r.usuario_id}:${r.cantidad_recibida} (${r.firma||"?"})`);
+            porProd[k].totalReportado+=r.cantidad_recibida;
+          });
+
+          body.innerHTML=Object.keys(porProd).length?Object.entries(porProd).map(([k,p])=>{
+            const comprado=totalComprado[k]||0;
+            const sobre=p.totalReportado>comprado;
+            return `
+              <div class="bg-white rounded-xl p-3 shadow-sm ${sobre?"border-2 border-red-400":""}">
+                <p class="font-semibold text-sm">${escapeHtml(p.nombre)}</p>
+                <p class="text-[10px] text-slate-500">Comprado: ${comprado} pz · Reportado: ${p.totalReportado} pz
+                  ${sobre?`<span class="text-red-600 font-bold"> ¡SOBRE-INFORME!</span>`:""}
+                </p>
+                <p class="text-xs text-slate-600 mt-1">${p.reportes.join(" · ")}</p>
+              </div>
+            `;
+          }).join(""):`<p class="text-xs text-slate-400 text-center py-6">Nadie ha reportado aún</p>`;
+        }
       },0);
       return wrap;
     }
@@ -686,19 +802,35 @@
       w.document.close();
     }
 
+    function generarPDFTraslado(items){
+      const w=window.open("","_blank");
+      if(!w){toast("Permite ventanas emergentes","warn");return;}
+      const filas=items.map(p=>`
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${p.foto_url?`<img src="${p.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">`:"📦"}</td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(p.nombre)}</b></td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-size:13px;">${p.dist.join(" · ")}</td>
+        </tr>`).join("");
+      w.document.write(`<!DOCTYPE html><html><head><title>TRASLADO</title>
+        <style>body{font-family:Arial,sans-serif;padding:24px;color:#0f172a;}h1{font-size:20px;margin:0 0 12px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
+        <h1>TRASLADO / EN TRÁNSITO</h1>
+        <table><thead><tr><th>Foto</th><th>Producto</th><th>Distribución</th></tr></thead><tbody>${filas}</tbody></table>
+        <script>setTimeout(()=>window.print(),400);<\/script></body></html>`);
+      w.document.close();
+    }
+
     // ===================== CONFIG =====================
     function renderConfig(){
       const wrap=el("div",{class:"space-y-3"});
       wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Usuarios"));
       const list=el("div",{id:"user-list",class:"space-y-1.5"});
       wrap.appendChild(list);
-
       const form=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2"});
       form.innerHTML=`
         <p class="text-xs font-semibold text-slate-600">Agregar / Reiniciar PIN</p>
         <div class="grid grid-cols-2 gap-2">
           <input id="nu-id" class="px-2.5 py-2 rounded-lg border text-sm uppercase outline-none" placeholder="Código" />
-          <input id="nu-pin" class="px-2.5 py-2 rounded-lg border text-sm text-center outline-none" placeholder="Nuevo PIN" maxlength="4" inputmode="numeric" />
+          <input id="nu-pin" class="px-2.5 py-2 rounded-lg border text-sm text-center outline-none" placeholder="PIN" maxlength="4" inputmode="numeric" />
         </div>
         <select id="nu-rol" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none">
           <option value="sucursal">Sucursal</option>
@@ -715,7 +847,7 @@
             <div class="bg-white rounded-xl p-2.5 shadow-sm flex justify-between items-center text-sm">
               <div>
                 <p class="font-semibold">${escapeHtml(u.id)} ${u.id===state.user.id?"(tú)":""}</p>
-                <p class="text-[10px] text-slate-500">${u.rol} · PIN: ••••</p>
+                <p class="text-[10px] text-slate-500">${u.rol}</p>
               </div>
               ${u.id!==state.user.id?`<button data-id="${u.id}" class="del-user text-xs text-red-600 font-semibold">Eliminar</button>`:""}
             </div>
@@ -724,14 +856,13 @@
             btn.onclick=async()=>{
               if(confirm("¿Eliminar "+btn.dataset.id+"?")){
                 await db.usuarios.delete(btn.dataset.id);
-                toast("Usuario eliminado");
+                toast("Eliminado");
                 cargarUsers();
               }
             };
           });
         }
         cargarUsers();
-
         $("#nu-save").onclick=async()=>{
           const id=$("#nu-id").value.trim().toUpperCase();
           const pin=$("#nu-pin").value.trim();
@@ -739,8 +870,7 @@
           if(!id||!/^\d{4}$/.test(pin)){toast("Código y PIN de 4 dígitos","err");return;}
           const existe=await db.usuarios.get(id);
           if(existe){
-            existe.pin=pin;
-            existe.synced=false;
+            existe.pin=pin; existe.synced=false;
             await db.usuarios.put(existe);
             toast("PIN de "+id+" reiniciado");
           } else {
@@ -752,10 +882,6 @@
         };
       },0);
       return wrap;
-    }
-
-    function renderRecibir(){
-      return el("div",{class:"p-3"},el("h2",{class:"text-base font-bold mb-2"},"Recibir"),el("p",{class:"text-sm text-slate-500"},"Confirmación de lote (próxima mejora)."));
     }
 
     async function init(){
