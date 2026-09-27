@@ -35,12 +35,15 @@
     const SUPABASE_KEY = "sb_publishable_fecbB60tAvSsHUZFf3OmYg_CFqG2NVW";
     const STORAGE_BUCKET = "productos";
     const UBICACIONES = ["M","C","R"];
-    const ALIAS = {m:"M",misaki:"M",isla:"M",eme:"M",c:"C",chiltepec:"C",chilte:"C",r:"R",rodriguez:"R","rodríguez":"R"};
+    const ALIAS = {
+      m:"M", misaki:"M", isla:"M", eme:"M",
+      c:"C", chiltepec:"C", chilte:"C",
+      r:"R", rodriguez:"R", "rodríguez":"R", rdgz:"R", r1:"R"
+    };
 
     let supabase = null;
     try { if (window.supabase) supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch(e){}
 
-    // BASE FIJA - NO CAMBIAR NOMBRE
     const db = new Dexie("BodegaMM");
     db.version(1).stores({
       productos: "id, codigo, nombre, estado, synced",
@@ -51,7 +54,7 @@
       config: "key"
     });
 
-    const state = { user:null, online:navigator.onLine, view:"login", toast:null, rtab:"compra" };
+    const state = { user:null, online:navigator.onLine, view:"login", toast:null, rtab:"compra", editId:null };
 
     const $ = (s,r=document)=>r.querySelector(s);
     const el = (tag,props={},...kids)=>{
@@ -71,7 +74,7 @@
       const d=new Date();
       return "P"+String(d.getFullYear()).slice(2)+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0");
     };
-    const fmtMoney = n => n!=null && n!=="" ? "$"+Number(n).toLocaleString("es-MX") : "Pendiente";
+    const fmtMoney = n => (n!=null && n!=="") ? "$"+Number(n).toLocaleString("es-MX") : null;
 
     function toast(msg,type="ok"){
       state.toast={msg,type};
@@ -86,9 +89,18 @@
       t.textContent=state.toast.msg;
     }
 
-    // ===== VOZ =====
+    // ===================== PARSER ROBUSTO =====================
     const WORD_NUMS={cero:0,uno:1,una:1,un:1,dos:2,tres:3,cuatro:4,cinco:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,once:11,doce:12,trece:13,catorce:14,quince:15,veinte:20,treinta:30,cuarenta:40,cincuenta:50,sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,mil:1000};
-    function wordsToNumber(t){t=(t||"").toLowerCase().trim();if(/^\d+$/.test(t))return parseInt(t,10);return WORD_NUMS[t]??null;}
+    function wordsToNumber(t){
+      t=(t||"").toLowerCase().trim();
+      if(/^\d+$/.test(t)) return parseInt(t,10);
+      return WORD_NUMS[t]??null;
+    }
+    function normText(t){
+      return (t||"").toLowerCase()
+        .replace(/[áéíóúü]/g,c=>({á:"a",é:"e",í:"i",ó:"o",ú:"u",ü:"u"}[c]))
+        .replace(/\s+/g," ").trim();
+    }
 
     function parseNombreCodigo(text){
       const norm=text.trim();
@@ -99,47 +111,160 @@
     }
 
     function parseCantidades(text){
-      const norm=text.toLowerCase().replace(/[áéíóú]/g,c=>({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c]));
+      const norm=normText(text);
       let paquetes=0,ppp=0,sueltas=0;
       const caja=norm.match(/(\d+|\w+)\s*cajas?\s*(?:con|de)?\s*(\d+|\w+)\s*(?:paquetes?|bolsas?)/);
       if(caja){paquetes=(wordsToNumber(caja[1])||0)*(wordsToNumber(caja[2])||0);}
+      const pqMatch=norm.match(/(\d+|\w+)\s*(?:paquetes?|pq|pqs)\s*(?:con|de)?\s*(\d+|\w+)?\s*(?:piezas?|pzs?|pz)?/);
+      if(pqMatch && !caja){
+        paquetes=wordsToNumber(pqMatch[1])||0;
+        if(pqMatch[2]) ppp=wordsToNumber(pqMatch[2])||0;
+      }
       const nums=[];
       norm.split(/[\s,;.]+/).forEach(tk=>{const n=wordsToNumber(tk);if(n!==null)nums.push(n);});
       if(!paquetes){
         if(nums.length===1) sueltas=nums[0];
         else if(nums.length===2){paquetes=nums[0];ppp=nums[1];}
         else if(nums.length>=3){paquetes=nums[0];ppp=nums[1];sueltas=nums[2];}
-      } else {
-        const pppM=norm.match(/(\d+|\w+)\s*piezas?\s*(?:por\s*)?(?:paquete|bolsa)/);
+      } else if(!ppp){
+        const pppM=norm.match(/(\d+|\w+)\s*(?:piezas?|pzs?|pz)\s*(?:por|cada|con)?\s*(?:paquete|bolsa)?/);
         if(pppM) ppp=wordsToNumber(pppM[1])||0;
         else if(nums.length>=2) ppp=nums[1];
-        const sueltaM=norm.match(/(\d+|\w+)\s*piezas?\s*sueltas?/);
-        if(sueltaM) sueltas=wordsToNumber(sueltaM[1])||0;
       }
+      const sueltaM=norm.match(/(\d+|\w+)\s*(?:piezas?|pzs?)\s*sueltas?/);
+      if(sueltaM) sueltas=wordsToNumber(sueltaM[1])||0;
       const total=paquetes*ppp+sueltas;
-      return {ok:total>0||paquetes>0, paquetes,ppp,sueltas,total};
+      return {ok:total>0||paquetes>0,paquetes,ppp,sueltas,total};
     }
 
-    function parseDistribucion(text,totalPiezas=0){
-      const norm=text.toLowerCase().replace(/[áéíóú]/g,c=>({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c])).replace(/\by\b/g," ");
+    // Parser de distribución MUCHO más robusto
+    function parseDistribucion(text, totalPiezas=0){
+      const norm=normText(text);
       const res={M:{paquetes:0,piezas:0},C:{paquetes:0,piezas:0},R:{paquetes:0,piezas:0}};
+      let assigned=0;
       let found=false;
-      if(/todo\s+(?:para|a)\s+(\w+)/.test(norm)){
-        const u=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
-        if(UBICACIONES.includes(u)){res[u].piezas=totalPiezas;return {ok:true,distribucion:res};}
+
+      // Todo a X
+      let m=norm.match(/(?:todo|todas)\s+(?:para|a)\s+(\w+)/);
+      if(m){
+        const u=ALIAS[m[1]]||m[1].toUpperCase();
+        if(UBICACIONES.includes(u)){
+          res[u].piezas=totalPiezas;
+          return {ok:true,distribucion:res,msg:`Todo a ${u}`};
+        }
       }
-      if(/cada\s+(uno|quien|lugar)/.test(norm)){
-        const n=wordsToNumber(norm.match(/(\d+|\w+)\s*(?:a\s+)?cada/)?.[1])||1;
-        UBICACIONES.forEach(u=>res[u].paquetes=n);
-        return {ok:true,distribucion:res};
+
+      // Partes iguales / uno para cada quien
+      if(/partes?\s*iguales?|uno\s+para\s+cada|igual\s+a\s+cada/.test(norm)){
+        const n=UBICACIONES.length;
+        const base=Math.floor(totalPiezas/n);
+        let extra=totalPiezas%n;
+        UBICACIONES.forEach((u,i)=>{
+          res[u].piezas=base+(extra>0?1:0);
+          if(extra>0) extra--;
+        });
+        return {ok:true,distribucion:res,msg:"Partes iguales"};
       }
-      for(const [alias,ubic] of Object.entries(ALIAS)){
-        const re=new RegExp(`(\\d+|\\w+)\\s*(?:paquetes?|piezas?)?\\s*(?:para|a|en)?\\s*${alias}`,"i");
-        const m=norm.match(re);
-        if(m){const n=wordsToNumber(m[1])??parseInt(m[1])??0; if(norm.includes("pieza")) res[ubic].piezas+=n; else res[ubic].paquetes+=n; found=true;}
+
+      // Mitad y mitad
+      if(/mitad/.test(norm)){
+        const locs=[];
+        for(const [a,u] of Object.entries(ALIAS)){
+          if(norm.includes(a) && !locs.includes(u)) locs.push(u);
+        }
+        if(locs.length>=2){
+          const half=Math.floor(totalPiezas/2);
+          res[locs[0]].piezas=half;
+          res[locs[1]].piezas=totalPiezas-half;
+          return {ok:true,distribucion:res,msg:"Mitad y mitad"};
+        }
       }
-      const corto=norm.match(/(\d+)\s*m\s*(\d+)\s*c\s*(\d+)\s*r/i)||norm.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if(corto){res.M.paquetes=+corto[1]||0;res.C.paquetes=+corto[2]||0;res.R.paquetes=+corto[3]||0;found=true;}
+
+      // Extraer asignaciones explícitas: "8 Isla", "Isla 8", "10 para M", "5 y 5 Rodriguez y Chilte"
+      const tokens=norm.split(/[\s,;]+/).filter(Boolean);
+      const explicit={M:0,C:0,R:0};
+
+      // Patrón: número + (para|a)? + ubicacion
+      const re1=/(\d+)\s*(?:para|a|en)?\s*(\w+)/g;
+      let match;
+      while((match=re1.exec(norm))!==null){
+        const num=+match[1];
+        const u=ALIAS[match[2]]||match[2].toUpperCase();
+        if(UBICACIONES.includes(u)){
+          explicit[u]+=num;
+          found=true;
+        }
+      }
+      // Patrón inverso: ubicacion + número
+      const re2=/(\w+)\s+(\d+)/g;
+      while((match=re2.exec(norm))!==null){
+        const u=ALIAS[match[1]]||match[1].toUpperCase();
+        const num=+match[2];
+        if(UBICACIONES.includes(u) && !isNaN(num)){
+          if(explicit[u]===0){ explicit[u]=num; found=true; }
+        }
+      }
+
+      // "10 y 10 Isla y R"
+      const yMatch=norm.match(/(\d+)\s*y\s*(\d+)\s+(\w+)\s*y\s*(\w+)/);
+      if(yMatch){
+        const u1=ALIAS[yMatch[3]]||yMatch[3].toUpperCase();
+        const u2=ALIAS[yMatch[4]]||yMatch[4].toUpperCase();
+        if(UBICACIONES.includes(u1)) explicit[u1]=+yMatch[1];
+        if(UBICACIONES.includes(u2)) explicit[u2]=+yMatch[2];
+        found=true;
+      }
+
+      assigned=explicit.M+explicit.C+explicit.R;
+
+      // Resto / las demás
+      if(/resto|demás|restante|sobrante/.test(norm)){
+        const resto=Math.max(0,totalPiezas-assigned);
+        const restoLocs=[];
+        // Detectar a quién va el resto
+        if(/resto\s+(?:a|para)\s+(\w+)\s*y\s*(\w+)/.test(norm)){
+          const u1=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
+          const u2=ALIAS[RegExp.$2]||RegExp.$2.toUpperCase();
+          if(UBICACIONES.includes(u1)) restoLocs.push(u1);
+          if(UBICACIONES.includes(u2)) restoLocs.push(u2);
+        } else if(/resto\s+(?:a|para)\s+(\w+)/.test(norm)){
+          const u=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
+          if(UBICACIONES.includes(u)) restoLocs.push(u);
+        } else if(/las?\s+dem[aá]s\s+(?:a|para)\s+(\w+)/.test(norm)){
+          const u=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
+          if(UBICACIONES.includes(u)) restoLocs.push(u);
+        } else {
+          // resto a los que no tienen asignación
+          UBICACIONES.forEach(u=>{ if(explicit[u]===0) restoLocs.push(u); });
+        }
+        if(restoLocs.length&&resto>0){
+          const base=Math.floor(resto/restoLocs.length);
+          let extra=resto%restoLocs.length;
+          restoLocs.forEach(u=>{
+            explicit[u]+=base+(extra>0?1:0);
+            if(extra>0) extra--;
+          });
+          found=true;
+        }
+      }
+
+      // Si solo se mencionaron algunas y no hay "resto", el resto queda en 0
+      UBICACIONES.forEach(u=>{
+        res[u].piezas=explicit[u]||0;
+      });
+
+      if(!found && totalPiezas>0){
+        // Último recurso: buscar cualquier número junto a alias
+        for(const [a,u] of Object.entries(ALIAS)){
+          const re=new RegExp(`(\\d+)\\s*${a}|${a}\\s*(\\d+)`);
+          const mm=norm.match(re);
+          if(mm){
+            res[u].piezas=+(mm[1]||mm[2]);
+            found=true;
+          }
+        }
+      }
+
       return found?{ok:true,distribucion:res}:{ok:false};
     }
 
@@ -206,8 +331,7 @@
         else if(state.view==="reportes") main.appendChild(renderReportes());
         else main.appendChild(renderConfig());
       } else {
-        if(state.view==="consultar") main.appendChild(renderConsultar());
-        else if(state.view==="recibir") main.appendChild(renderRecibir());
+        if(state.view==="recibir") main.appendChild(renderRecibir());
         else main.appendChild(renderConsultar());
       }
       app.appendChild(main);
@@ -264,7 +388,7 @@
       return w;
     }
 
-    // ===================== REGISTRO (ADMIN) =====================
+    // ===================== REGISTRO =====================
     function renderRegistro(){
       const wrap=el("div",{class:"space-y-2"});
       const card=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2.5"});
@@ -282,7 +406,7 @@
             </div>
           </div>
         </div>
-        <input id="foto-input" type="file" accept="image/*" capture="environment" class="hidden" />
+        <input id="foto-input" type="file" accept="image/*" class="hidden" />
 
         <div>
           <div class="text-[11px] font-semibold text-slate-600 mb-1">Cantidades</div>
@@ -307,32 +431,35 @@
         </div>
 
         <div>
-          <div class="flex justify-between items-center mb-1">
-            <span class="text-[11px] font-semibold text-slate-600">Distribución (solo Admin ve esto)</span>
-            <button id="btn-dictar-dist" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg">🎙</button>
-          </div>
-          <div class="grid grid-cols-3 gap-1.5">
-            <div class="bg-brand-50 rounded-lg p-1.5 text-center">
-              <div class="font-bold text-brand-700 text-sm">M</div>
-              <div class="flex gap-1 justify-center mt-1">
-                <input id="d-M-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs font-semibold" />
-                <input id="d-M-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" />
+          <div class="text-[11px] font-semibold text-slate-600 mb-1">Distribución</div>
+          <div class="flex items-start gap-1.5">
+            <div class="flex-1 grid grid-cols-3 gap-1">
+              <div class="bg-brand-50 rounded-lg p-1 text-center">
+                <div class="font-bold text-brand-700 text-xs">M</div>
+                <div class="text-[9px] text-slate-400">PQ · PZ</div>
+                <div class="flex gap-0.5 justify-center mt-0.5">
+                  <input id="d-M-paq" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs font-semibold" />
+                  <input id="d-M-pzs" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs" />
+                </div>
+              </div>
+              <div class="bg-brand-50 rounded-lg p-1 text-center">
+                <div class="font-bold text-brand-700 text-xs">C</div>
+                <div class="text-[9px] text-slate-400">PQ · PZ</div>
+                <div class="flex gap-0.5 justify-center mt-0.5">
+                  <input id="d-C-paq" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs font-semibold" />
+                  <input id="d-C-pzs" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs" />
+                </div>
+              </div>
+              <div class="bg-brand-50 rounded-lg p-1 text-center">
+                <div class="font-bold text-brand-700 text-xs">R</div>
+                <div class="text-[9px] text-slate-400">PQ · PZ</div>
+                <div class="flex gap-0.5 justify-center mt-0.5">
+                  <input id="d-R-paq" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs font-semibold" />
+                  <input id="d-R-pzs" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs" />
+                </div>
               </div>
             </div>
-            <div class="bg-brand-50 rounded-lg p-1.5 text-center">
-              <div class="font-bold text-brand-700 text-sm">C</div>
-              <div class="flex gap-1 justify-center mt-1">
-                <input id="d-C-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs font-semibold" />
-                <input id="d-C-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" />
-              </div>
-            </div>
-            <div class="bg-brand-50 rounded-lg p-1.5 text-center">
-              <div class="font-bold text-brand-700 text-sm">R</div>
-              <div class="flex gap-1 justify-center mt-1">
-                <input id="d-R-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs font-semibold" />
-                <input id="d-R-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" />
-              </div>
-            </div>
+            <button id="btn-dictar-dist" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg shrink-0 mt-1">🎙</button>
           </div>
           <div id="d-validacion" class="text-xs font-medium text-amber-600 mt-1">Falta distribuir</div>
         </div>
@@ -340,13 +467,13 @@
         <div class="grid grid-cols-[1fr_1fr_auto] gap-1.5 items-end">
           <div>
             <label class="text-[10px] text-slate-500">Precio</label>
-            <input id="p-precio" type="number" class="w-full px-2 py-2 rounded-lg border text-sm" placeholder="0" />
+            <input id="p-precio" type="number" inputmode="decimal" class="w-full px-2 py-2 rounded-lg border text-sm" placeholder="0" />
           </div>
           <div>
             <label class="text-[10px] text-slate-500">Proveedor</label>
             <input id="p-proveedor" class="w-full px-2 py-2 rounded-lg border text-sm" placeholder="Proveedor" />
           </div>
-          <button id="btn-guardar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold leading-tight h-[42px]">Guardar<br>Producto</button>
+          <button id="btn-guardar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold leading-tight h-[42px]">Guardar</button>
         </div>
         <div class="text-[10px] text-slate-500">Nota: <span id="p-nota-auto" class="font-semibold text-brand-700"></span></div>
       `;
@@ -437,15 +564,16 @@
           } else toast("No entendí cantidades","warn");
         });
         dictar("#btn-dictar-dist",texto=>{
-          const {total}=calc();
+          const {total,ppp}=calc();
           const res=parseDistribucion(texto,total);
           if(res.ok){
             UBICACIONES.forEach(u=>{
+              // Preferimos piezas; si el usuario habló de paquetes el parser actual pone en piezas
               $(`#d-${u}-paq`).value=res.distribucion[u].paquetes;
               $(`#d-${u}-pzs`).value=res.distribucion[u].piezas;
             });
             calc();
-            toast("Distribución aplicada");
+            toast(res.msg||"Distribución aplicada");
           } else toast("No entendí distribución","warn");
         });
 
@@ -531,14 +659,29 @@
         async function cargarLista(){
           const compras=await db.compras.orderBy("creado_en").reverse().limit(20).toArray();
           list.innerHTML=compras.length?compras.map(c=>`
-            <div class="bg-white rounded-lg p-2 shadow-sm flex gap-2 items-center text-xs" data-id="${c.id}">
+            <div class="bg-white rounded-lg p-2 shadow-sm flex gap-2 items-center text-xs" data-id="${c.id}" data-pid="${c.producto_id}">
               ${c.foto_url?`<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
               <div class="flex-1 min-w-0">
                 <p class="font-semibold truncate">${escapeHtml(c.nombre)}</p>
-                <p class="text-slate-500">${c.desglose||c.total_piezas+" pz"}${c.dist_resumen?" · "+c.dist_resumen:""}</p>
+                <p class="text-slate-500">${c.desglose||c.total_piezas+" pz"}</p>
               </div>
+              <button class="btn-edit-rec px-2 py-1 bg-brand-100 text-brand-700 rounded text-[10px] font-semibold" data-pid="${c.producto_id}">Precio</button>
             </div>
           `).join(""):`<p class="text-xs text-slate-400 text-center py-3">Sin registros</p>`;
+
+          list.querySelectorAll(".btn-edit-rec").forEach(btn=>{
+            btn.onclick=async e=>{
+              e.stopPropagation();
+              const p=await db.productos.get(btn.dataset.pid);
+              if(!p) return;
+              const nuevo=prompt("Precio:", p.precio_base??"");
+              if(nuevo===null) return;
+              p.precio_base=nuevo===""?null:+nuevo;
+              p.synced=false;
+              await db.productos.put(p);
+              toast("Precio actualizado");
+            };
+          });
         }
         await cargarLista();
         calc();
@@ -559,24 +702,62 @@
         const prods=await db.productos.orderBy("nombre").toArray();
         const renderList=(q="")=>{
           const filt=prods.filter(p=>!q||(p.nombre||"").toLowerCase().includes(q.toLowerCase())||(p.codigo||"").toLowerCase().includes(q.toLowerCase()));
-          list.innerHTML=filt.length?filt.map(p=>`
-            <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center">
+          list.innerHTML=filt.length?filt.map(p=>{
+            const precio=fmtMoney(p.precio_base);
+            return `
+            <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center" data-id="${p.id}">
               ${p.foto_url?`<img src="${p.foto_url}" class="w-11 h-11 rounded-lg object-cover">`:`<div class="w-11 h-11 rounded-lg bg-slate-100 flex items-center justify-center text-sm">📦</div>`}
               <div class="flex-1 min-w-0">
                 <p class="font-semibold text-sm truncate">${escapeHtml(p.nombre)}</p>
                 <p class="text-[10px] text-slate-500">${escapeHtml(p.codigo||"—")}</p>
               </div>
-              <div class="text-right">
-                <p class="font-bold text-sm ${p.precio_base!=null?"text-brand-600":"text-amber-500"}">${fmtMoney(p.precio_base)}</p>
-                ${state.user.rol==="admin"?`<button data-id="${p.id}" class="edit-precio text-[10px] text-brand-600 font-semibold">Editar</button>`:""}
+              <div class="text-right min-w-[4.5rem]">
+                ${precio
+                  ? `<p class="font-bold text-sm text-brand-600">${precio}</p>`
+                  : `<p class="text-xs text-amber-600 font-semibold">$ —</p><p class="text-[9px] text-amber-500">Precio pendiente</p>`
+                }
+                ${state.user.rol==="admin"?`<button data-id="${p.id}" class="btn-precio mt-0.5 px-2 py-0.5 bg-brand-100 text-brand-700 rounded text-[10px] font-bold">Editar</button>`:""}
               </div>
-            </div>
-          `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin productos</p>`;
+            </div>`;
+          }).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin productos</p>`;
 
-          list.querySelectorAll(".edit-precio").forEach(btn=>{
+          // Toque corto = editar precio | Mantener = eliminar
+          list.querySelectorAll(".btn-precio").forEach(btn=>{
+            let timer=null, red=false;
+            const reset=()=>{ red=false; btn.textContent="Editar"; btn.className="btn-precio mt-0.5 px-2 py-0.5 bg-brand-100 text-brand-700 rounded text-[10px] font-bold"; };
+            btn.addEventListener("touchstart",e=>{
+              e.preventDefault();
+              timer=setTimeout(()=>{
+                red=true;
+                btn.textContent="Eliminar";
+                btn.className="btn-precio mt-0.5 px-2 py-0.5 bg-red-500 text-white rounded text-[10px] font-bold";
+              },700);
+            });
+            btn.addEventListener("touchend",async e=>{
+              e.preventDefault();
+              clearTimeout(timer);
+              if(red){
+                if(confirm("¿Eliminar este producto?")){
+                  await db.productos.delete(btn.dataset.id);
+                  toast("Producto eliminado");
+                  render();
+                } else reset();
+              } else {
+                const p=await db.productos.get(btn.dataset.id);
+                const nuevo=prompt("Precio:", p.precio_base??"");
+                if(nuevo===null) return;
+                p.precio_base=nuevo===""?null:+nuevo;
+                p.synced=false;
+                await db.productos.put(p);
+                toast("Precio actualizado");
+                render();
+              }
+            });
+            btn.addEventListener("touchmove",()=>{clearTimeout(timer);reset();});
+            // Desktop
             btn.onclick=async()=>{
               const p=await db.productos.get(btn.dataset.id);
-              const nuevo=prompt("Nuevo precio para "+p.nombre+":", p.precio_base??"");
+              const nuevo=prompt("Precio:", p.precio_base??"");
               if(nuevo===null) return;
               p.precio_base=nuevo===""?null:+nuevo;
               p.synced=false;
@@ -592,39 +773,35 @@
       return wrap;
     }
 
-    // ===================== RECIBIR (nuevo flujo) =====================
+    // ===================== RECIBIR =====================
     function renderRecibir(){
       const wrap=el("div",{class:"space-y-2"});
       wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Reportar lo recibido"));
-      wrap.appendChild(el("p",{class:"text-xs text-slate-500"},"Indica solo la cantidad que realmente te llegó. No ves cuánto se distribuyó."));
+      wrap.appendChild(el("p",{class:"text-xs text-slate-500"},"Indica solo lo que te llegó. No ves la distribución."));
 
       const firmaBox=el("div",{class:"bg-brand-50 rounded-xl p-2.5 flex gap-2 items-center"});
       firmaBox.innerHTML=`
-        <input id="firma" class="flex-1 px-3 py-2 rounded-lg border text-sm font-semibold uppercase outline-none" placeholder="Tu nombre (firma)" />
-        <button id="btn-confirmar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold whitespace-nowrap">Confirmar</button>
+        <input id="firma" class="flex-1 px-3 py-2 rounded-lg border text-sm font-semibold uppercase outline-none" placeholder="Tu nombre" />
+        <button id="btn-confirmar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold">Confirmar</button>
       `;
       wrap.appendChild(firmaBox);
-
       const list=el("div",{id:"rec-list",class:"space-y-1.5"});
       wrap.appendChild(list);
 
       setTimeout(async()=>{
-        // Mostrar productos de compras recientes (sin cantidades de distribución)
-        const compras=await db.compras.orderBy("creado_en").reverse().limit(30).toArray();
-        // Agrupar por producto para no repetir
+        const compras=await db.compras.orderBy("creado_en").reverse().limit(40).toArray();
         const vistos=new Set();
         const items=[];
         for(const c of compras){
-          if(vistos.has(c.producto_id||c.nombre)) continue;
-          vistos.add(c.producto_id||c.nombre);
+          const k=c.producto_id||c.nombre;
+          if(vistos.has(k)) continue;
+          vistos.add(k);
           items.push(c);
         }
-
         if(!items.length){
-          list.innerHTML=`<p class="text-xs text-slate-400 text-center py-8">No hay productos para reportar</p>`;
+          list.innerHTML=`<p class="text-xs text-slate-400 text-center py-8">No hay productos</p>`;
           return;
         }
-
         list.innerHTML=items.map(c=>`
           <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center" data-id="${c.producto_id||c.id}" data-nombre="${escapeHtml(c.nombre)}" data-codigo="${escapeHtml(c.codigo||"")}">
             ${c.foto_url?`<img src="${c.foto_url}" class="w-12 h-12 rounded-lg object-cover">`:`<div class="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center">📦</div>`}
@@ -632,11 +809,10 @@
               <p class="font-semibold text-sm truncate">${escapeHtml(c.nombre)}</p>
               <p class="text-[10px] text-slate-500">${escapeHtml(c.codigo||"")}</p>
             </div>
-            <input type="number" min="0" value="0" class="rec-qty w-16 px-2 py-1.5 rounded-lg border text-center text-sm font-bold" placeholder="0" />
+            <input type="number" min="0" value="0" inputmode="numeric" class="rec-qty w-16 px-2 py-1.5 rounded-lg border text-center text-sm font-bold" />
           </div>
         `).join("");
 
-        // Ceros desaparecen al focus
         list.querySelectorAll(".rec-qty").forEach(inp=>{
           inp.addEventListener("focus",()=>{if(inp.value==="0")inp.value="";});
           inp.addEventListener("blur",()=>{if(inp.value==="")inp.value="0";});
@@ -645,28 +821,20 @@
         $("#btn-confirmar").onclick=async()=>{
           const firma=$("#firma").value.trim().toUpperCase();
           if(!firma){toast("Escribe tu nombre","err");return;}
-
-          const rows=list.querySelectorAll("[data-id]");
-          let guardados=0;
-          for(const row of rows){
+          let n=0;
+          for(const row of list.querySelectorAll("[data-id]")){
             const qty=+(row.querySelector(".rec-qty").value)||0;
             if(qty<=0) continue;
             await db.recepciones.put({
-              id:uid(),
-              producto_id:row.dataset.id,
-              codigo:row.dataset.codigo,
-              nombre:row.dataset.nombre,
-              usuario_id:state.user.id,
-              cantidad_recibida:qty,
-              firma,
-              fecha:new Date().toISOString().slice(0,10),
-              creado_en:new Date().toISOString(),
-              synced:false
+              id:uid(), producto_id:row.dataset.id, codigo:row.dataset.codigo,
+              nombre:row.dataset.nombre, usuario_id:state.user.id,
+              cantidad_recibida:qty, firma, fecha:new Date().toISOString().slice(0,10),
+              creado_en:new Date().toISOString(), synced:false
             });
-            guardados++;
+            n++;
           }
-          if(guardados===0){toast("No indicaste ninguna cantidad","warn");return;}
-          toast(`Registrado: ${guardados} producto(s) · Firma: ${firma}`);
+          if(!n){toast("No indicaste cantidades","warn");return;}
+          toast(`Registrado ${n} producto(s)`);
           render();
         };
       },0);
@@ -690,7 +858,6 @@
 
       setTimeout(async()=>{
         const tab=state.rtab||"compra";
-
         if(tab==="compra"){
           const compras=await db.compras.orderBy("creado_en").reverse().toArray();
           const porNota={};
@@ -720,7 +887,6 @@
               `).join("")}
             </div>
           `).join("")||`<p class="text-xs text-slate-400 text-center py-6">No hay compras</p>`;
-
           body.querySelectorAll(".btn-pdf-compra").forEach(btn=>{
             btn.onclick=()=>generarPDFCompra(btn.dataset.nota,porNota[btn.dataset.nota]);
           });
@@ -750,8 +916,7 @@
           if(btn) btn.onclick=()=>generarPDFTraslado(items);
         }
         else if(tab==="recepciones"){
-          // Admin ve lo que reportó cada usuario y detecta sobre-informe
-          const recepciones=await db.recepciones.orderBy("creado_en").reverse().toArray();
+          const recepciones=await db.recepciones.toArray();
           const compras=await db.compras.toArray();
           const totalComprado={};
           compras.forEach(c=>{
@@ -761,24 +926,22 @@
           const porProd={};
           recepciones.forEach(r=>{
             const k=r.producto_id||r.nombre;
-            if(!porProd[k]) porProd[k]={nombre:r.nombre,codigo:r.codigo,reportes:[],totalReportado:0};
-            porProd[k].reportes.push(`${r.usuario_id}:${r.cantidad_recibida} (${r.firma||"?"})`);
+            if(!porProd[k]) porProd[k]={nombre:r.nombre,totalReportado:0,reportes:[]};
+            porProd[k].reportes.push(`${r.usuario_id}:${r.cantidad_recibida}`);
             porProd[k].totalReportado+=r.cantidad_recibida;
           });
-
           body.innerHTML=Object.keys(porProd).length?Object.entries(porProd).map(([k,p])=>{
             const comprado=totalComprado[k]||0;
             const sobre=p.totalReportado>comprado;
             return `
               <div class="bg-white rounded-xl p-3 shadow-sm ${sobre?"border-2 border-red-400":""}">
                 <p class="font-semibold text-sm">${escapeHtml(p.nombre)}</p>
-                <p class="text-[10px] text-slate-500">Comprado: ${comprado} pz · Reportado: ${p.totalReportado} pz
+                <p class="text-[10px] text-slate-500">Comprado: ${comprado} · Reportado: ${p.totalReportado}
                   ${sobre?`<span class="text-red-600 font-bold"> ¡SOBRE-INFORME!</span>`:""}
                 </p>
-                <p class="text-xs text-slate-600 mt-1">${p.reportes.join(" · ")}</p>
-              </div>
-            `;
-          }).join(""):`<p class="text-xs text-slate-400 text-center py-6">Nadie ha reportado aún</p>`;
+                <p class="text-xs mt-1">${p.reportes.join(" · ")}</p>
+              </div>`;
+          }).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin recepciones</p>`;
         }
       },0);
       return wrap;
@@ -794,14 +957,13 @@
           <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-size:13px;">${escapeHtml(c.desglose||c.total_piezas+" pz")}</td>
         </tr>`).join("");
       w.document.write(`<!DOCTYPE html><html><head><title>COMPRA ${nota}</title>
-        <style>body{font-family:Arial,sans-serif;padding:24px;color:#0f172a;}h1{font-size:20px;margin:0 0 4px;}.meta{color:#64748b;font-size:13px;margin-bottom:20px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
+        <style>body{font-family:Arial,sans-serif;padding:24px;}h1{font-size:20px;margin:0 0 4px;}.meta{color:#64748b;font-size:13px;margin-bottom:20px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
         <h1>COMPRA ${escapeHtml(nota)}</h1>
-        <div class="meta">Proveedor: <b>${escapeHtml(grupo.proveedor||"—")}</b> · Fecha: ${grupo.fecha}</div>
+        <div class="meta">Proveedor: <b>${escapeHtml(grupo.proveedor||"—")}</b> · ${grupo.fecha}</div>
         <table><thead><tr><th>Foto</th><th>Producto</th><th>Cantidad</th></tr></thead><tbody>${filas}</tbody></table>
         <script>setTimeout(()=>window.print(),400);<\/script></body></html>`);
       w.document.close();
     }
-
     function generarPDFTraslado(items){
       const w=window.open("","_blank");
       if(!w){toast("Permite ventanas emergentes","warn");return;}
@@ -809,17 +971,16 @@
         <tr>
           <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${p.foto_url?`<img src="${p.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">`:"📦"}</td>
           <td style="padding:8px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(p.nombre)}</b></td>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-size:13px;">${p.dist.join(" · ")}</td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${p.dist.join(" · ")}</td>
         </tr>`).join("");
       w.document.write(`<!DOCTYPE html><html><head><title>TRASLADO</title>
-        <style>body{font-family:Arial,sans-serif;padding:24px;color:#0f172a;}h1{font-size:20px;margin:0 0 12px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
-        <h1>TRASLADO / EN TRÁNSITO</h1>
+        <style>body{font-family:Arial,sans-serif;padding:24px;}h1{font-size:20px;margin:0 0 12px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
+        <h1>TRASLADO</h1>
         <table><thead><tr><th>Foto</th><th>Producto</th><th>Distribución</th></tr></thead><tbody>${filas}</tbody></table>
         <script>setTimeout(()=>window.print(),400);<\/script></body></html>`);
       w.document.close();
     }
 
-    // ===================== CONFIG =====================
     function renderConfig(){
       const wrap=el("div",{class:"space-y-3"});
       wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Usuarios"));
@@ -839,7 +1000,6 @@
         <button id="nu-save" class="w-full bg-brand-600 text-white py-2 rounded-lg text-sm font-bold">Guardar / Reiniciar PIN</button>
       `;
       wrap.appendChild(form);
-
       setTimeout(async()=>{
         async function cargarUsers(){
           const users=await db.usuarios.toArray();
@@ -869,15 +1029,9 @@
           const rol=$("#nu-rol").value;
           if(!id||!/^\d{4}$/.test(pin)){toast("Código y PIN de 4 dígitos","err");return;}
           const existe=await db.usuarios.get(id);
-          if(existe){
-            existe.pin=pin; existe.synced=false;
-            await db.usuarios.put(existe);
-            toast("PIN de "+id+" reiniciado");
-          } else {
-            await db.usuarios.put({id,pin,rol,synced:false});
-            toast("Usuario "+id+" creado");
-          }
-          $("#nu-id").value=""; $("#nu-pin").value="";
+          if(existe){existe.pin=pin;existe.synced=false;await db.usuarios.put(existe);toast("PIN reiniciado");}
+          else{await db.usuarios.put({id,pin,rol,synced:false});toast("Usuario creado");}
+          $("#nu-id").value="";$("#nu-pin").value="";
           cargarUsers();
         };
       },0);
