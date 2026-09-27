@@ -31,377 +31,298 @@
   <div id="app"></div>
 
   <script type="module">
-    // ===================== CONFIG =====================
     const SUPABASE_URL = "https://ycbuzyczxrbclckabkow.supabase.co";
-    const SUPABASE_KEY = "sb_publishable_fecbB60tAvSsHUZFf3OmYg_CFqG2NVW"; // Cámbiala por una nueva
+    const SUPABASE_KEY = "sb_publishable_fecbB60tAvSsHUZFf3OmYg_CFqG2NVW";
     const STORAGE_BUCKET = "productos";
     const UBICACIONES = ["M","C","R"];
-    const ALIAS = {
-      m:"M",misaki:"M",isla:"M",eme:"M",
-      c:"C",chiltepec:"C",chilte:"C",
-      r:"R",rodriguez:"R","rodríguez":"R"
-    };
+    const ALIAS = {m:"M",misaki:"M",isla:"M",eme:"M",c:"C",chiltepec:"C",chilte:"C",r:"R",rodriguez:"R","rodríguez":"R"};
 
     let supabase = null;
-    try {
-      if (window.supabase) supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-    } catch(e){}
+    try { if (window.supabase) supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch(e){}
 
-    const db = new Dexie("BodegaMM_v5");
+    const db = new Dexie("BodegaMM_v6");
     db.version(1).stores({
       productos: "id, codigo, nombre, estado, synced",
-      compras: "id, producto_id, fecha, nota, synced",
+      compras: "id, producto_id, fecha, nota, creado_en, synced",
       envios: "id, producto_id, sucursal_destino, estado, synced",
       usuarios: "id, pin, rol, synced",
       config: "key"
     });
 
-    const state = {
-      user: null,
-      online: navigator.onLine,
-      view: "login",
-      toast: null,
-      rtab: "compra",
-      editando: null
-    };
+    const state = { user:null, online:navigator.onLine, view:"login", toast:null, rtab:"compra" };
 
-    // ===================== UTILS =====================
-    const $ = (s, r=document) => r.querySelector(s);
-    const el = (tag, props={}, ...kids) => {
-      const n = document.createElement(tag);
-      Object.entries(props).forEach(([k,v]) => {
-        if (k === "class") n.className = v;
-        else if (k === "html") n.innerHTML = v;
-        else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2).toLowerCase(), v);
-        else n.setAttribute(k, v);
+    const $ = (s,r=document)=>r.querySelector(s);
+    const el = (tag,props={},...kids)=>{
+      const n=document.createElement(tag);
+      Object.entries(props).forEach(([k,v])=>{
+        if(k==="class") n.className=v;
+        else if(k==="html") n.innerHTML=v;
+        else if(k.startsWith("on")&&typeof v==="function") n.addEventListener(k.slice(2).toLowerCase(),v);
+        else n.setAttribute(k,v);
       });
-      kids.flat().forEach(c => {
-        if (c != null && c !== false) n.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(c) : c);
-      });
+      kids.flat().forEach(c=>{ if(c!=null&&c!==false) n.appendChild(typeof c==="string"||typeof c==="number"?document.createTextNode(c):c); });
       return n;
     };
-    const uid = () => crypto.randomUUID?.() || ("id-" + Date.now());
-    const escapeHtml = s => String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-    const hoyNota = () => {
-      const d = new Date();
-      return "P" + String(d.getFullYear()).slice(2) +
-             String(d.getMonth()+1).padStart(2,"0") +
-             String(d.getDate()).padStart(2,"0");
+    const uid = ()=>crypto.randomUUID?.()||("id-"+Date.now());
+    const escapeHtml = s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    const hoyNota = ()=>{
+      const d=new Date();
+      return "P"+String(d.getFullYear()).slice(2)+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0");
     };
 
-    function toast(msg, type="ok") {
-      state.toast = {msg, type};
+    function toast(msg,type="ok"){
+      state.toast={msg,type};
       renderToast();
-      setTimeout(() => { state.toast = null; renderToast(); }, 2600);
+      setTimeout(()=>{state.toast=null;renderToast();},2800);
     }
-    function renderToast() {
-      let t = $("#toast");
-      if (!state.toast) { if (t) t.remove(); return; }
-      if (!t) {
-        t = el("div", {id:"toast", class:"fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[90%] text-center"});
-        document.body.appendChild(t);
-      }
-      t.className = "fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[90%] text-center " +
-        (state.toast.type==="ok" ? "bg-emerald-600" : state.toast.type==="warn" ? "bg-amber-500" : "bg-red-600");
-      t.textContent = state.toast.msg;
+    function renderToast(){
+      let t=$("#toast");
+      if(!state.toast){if(t)t.remove();return;}
+      if(!t){t=el("div",{id:"toast",class:"fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[92%] text-center"});document.body.appendChild(t);}
+      t.className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[92%] text-center "+(state.toast.type==="ok"?"bg-emerald-600":state.toast.type==="warn"?"bg-amber-500":"bg-red-600");
+      t.textContent=state.toast.msg;
     }
 
-    // ===================== VOZ =====================
-    const WORD_NUMS = {
-      cero:0,uno:1,una:1,un:1,dos:2,tres:3,cuatro:4,cinco:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,
-      once:11,doce:12,trece:13,catorce:14,quince:15,veinte:20,treinta:30,cuarenta:40,cincuenta:50,
-      sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,mil:1000
-    };
-    function wordsToNumber(t) {
-      t = (t||"").toLowerCase().trim();
-      if (/^\d+$/.test(t)) return parseInt(t,10);
-      return WORD_NUMS[t] ?? null;
+    // ===== VOZ =====
+    const WORD_NUMS={cero:0,uno:1,una:1,un:1,dos:2,tres:3,cuatro:4,cinco:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,once:11,doce:12,trece:13,catorce:14,quince:15,veinte:20,treinta:30,cuarenta:40,cincuenta:50,sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,mil:1000};
+    function wordsToNumber(t){t=(t||"").toLowerCase().trim();if(/^\d+$/.test(t))return parseInt(t,10);return WORD_NUMS[t]??null;}
+
+    function parseNombreCodigo(text){
+      const norm=text.trim();
+      const re=/(.+?)\s+(?:c[oó]digo|clave|modelo)\s+([A-Za-z0-9\-_]+)/i;
+      const m=norm.match(re);
+      if(m) return {nombre:m[1].trim(), codigo:m[2].trim().toUpperCase()};
+      return {nombre:norm, codigo:""};
     }
 
-    // Dictado Nombre + Código
-    function parseNombreCodigo(text) {
-      const norm = text.trim();
-      // Busca "código/clave/modelo XXX"
-      const re = /(.+?)\s+(?:c[oó]digo|clave|modelo)\s+([A-Za-z0-9\-_]+)/i;
-      const m = norm.match(re);
-      if (m) {
-        return { nombre: m[1].trim(), codigo: m[2].trim().toUpperCase() };
-      }
-      // Si no hay indicador de código → todo es nombre y código = SC
-      return { nombre: norm, codigo: "SC" };
-    }
-
-    function parseCantidades(text) {
-      const norm = text.toLowerCase().replace(/[áéíóú]/g, c => ({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c]));
-      let paquetes = 0, ppp = 0, sueltas = 0;
-
-      // 2 cajas con 24 paquetes de 10
-      const caja = norm.match(/(\d+|\w+)\s*cajas?\s*(?:con|de)?\s*(\d+|\w+)\s*(?:paquetes?|bolsas?)/);
-      if (caja) {
-        const nc = wordsToNumber(caja[1]) || 0;
-        const np = wordsToNumber(caja[2]) || 0;
-        paquetes = nc * np;
-      }
-
-      const nums = [];
-      norm.split(/[\s,;.]+/).forEach(tk => {
-        const n = wordsToNumber(tk);
-        if (n !== null) nums.push(n);
-      });
-
-      if (!paquetes) {
-        if (nums.length === 1) sueltas = nums[0];
-        else if (nums.length === 2) { paquetes = nums[0]; ppp = nums[1]; }
-        else if (nums.length >= 3) { paquetes = nums[0]; ppp = nums[1]; sueltas = nums[2]; }
+    function parseCantidades(text){
+      const norm=text.toLowerCase().replace(/[áéíóú]/g,c=>({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c]));
+      let paquetes=0,ppp=0,sueltas=0;
+      const caja=norm.match(/(\d+|\w+)\s*cajas?\s*(?:con|de)?\s*(\d+|\w+)\s*(?:paquetes?|bolsas?)/);
+      if(caja){paquetes=(wordsToNumber(caja[1])||0)*(wordsToNumber(caja[2])||0);}
+      const nums=[];
+      norm.split(/[\s,;.]+/).forEach(tk=>{const n=wordsToNumber(tk);if(n!==null)nums.push(n);});
+      if(!paquetes){
+        if(nums.length===1) sueltas=nums[0];
+        else if(nums.length===2){paquetes=nums[0];ppp=nums[1];}
+        else if(nums.length>=3){paquetes=nums[0];ppp=nums[1];sueltas=nums[2];}
       } else {
-        const pppM = norm.match(/(\d+|\w+)\s*piezas?\s*(?:por\s*)?(?:paquete|bolsa)/);
-        if (pppM) ppp = wordsToNumber(pppM[1]) || 0;
-        else if (nums.length >= 2) ppp = nums[1];
-        const sueltaM = norm.match(/(\d+|\w+)\s*piezas?\s*sueltas?/);
-        if (sueltaM) sueltas = wordsToNumber(sueltaM[1]) || 0;
+        const pppM=norm.match(/(\d+|\w+)\s*piezas?\s*(?:por\s*)?(?:paquete|bolsa)/);
+        if(pppM) ppp=wordsToNumber(pppM[1])||0;
+        else if(nums.length>=2) ppp=nums[1];
+        const sueltaM=norm.match(/(\d+|\w+)\s*piezas?\s*sueltas?/);
+        if(sueltaM) sueltas=wordsToNumber(sueltaM[1])||0;
       }
-
-      const total = paquetes * ppp + sueltas;
-      return { ok: total > 0 || paquetes > 0, paquetes, ppp, sueltas, total };
+      const total=paquetes*ppp+sueltas;
+      return {ok:total>0||paquetes>0, paquetes,ppp,sueltas,total};
     }
 
-    function parseDistribucion(text, totalPiezas = 0) {
-      const norm = text.toLowerCase()
-        .replace(/[áéíóú]/g, c => ({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c]))
-        .replace(/\by\b/g, " ");
-      const res = { M:{paquetes:0,piezas:0}, C:{paquetes:0,piezas:0}, R:{paquetes:0,piezas:0} };
-      let found = false;
-
-      if (/todo\s+(?:para|a)\s+(\w+)/.test(norm)) {
-        const u = ALIAS[RegExp.$1] || RegExp.$1.toUpperCase();
-        if (UBICACIONES.includes(u)) {
-          res[u].piezas = totalPiezas;
-          return { ok:true, distribucion:res };
-        }
+    function parseDistribucion(text,totalPiezas=0){
+      const norm=text.toLowerCase().replace(/[áéíóú]/g,c=>({á:"a",é:"e",í:"i",ó:"o",ú:"u"}[c])).replace(/\by\b/g," ");
+      const res={M:{paquetes:0,piezas:0},C:{paquetes:0,piezas:0},R:{paquetes:0,piezas:0}};
+      let found=false;
+      if(/todo\s+(?:para|a)\s+(\w+)/.test(norm)){
+        const u=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
+        if(UBICACIONES.includes(u)){res[u].piezas=totalPiezas;return {ok:true,distribucion:res};}
       }
-      if (/cada\s+(uno|quien|lugar)/.test(norm)) {
-        const n = wordsToNumber(norm.match(/(\d+|\w+)\s*(?:a\s+)?cada/)?.[1]) || 1;
-        UBICACIONES.forEach(u => res[u].paquetes = n);
-        return { ok:true, distribucion:res };
+      if(/cada\s+(uno|quien|lugar)/.test(norm)){
+        const n=wordsToNumber(norm.match(/(\d+|\w+)\s*(?:a\s+)?cada/)?.[1])||1;
+        UBICACIONES.forEach(u=>res[u].paquetes=n);
+        return {ok:true,distribucion:res};
       }
-      for (const [alias, ubic] of Object.entries(ALIAS)) {
-        const re = new RegExp(`(\\d+|\\w+)\\s*(?:paquetes?|piezas?)?\\s*(?:para|a|en)?\\s*${alias}`, "i");
-        const m = norm.match(re);
-        if (m) {
-          const n = wordsToNumber(m[1]) ?? parseInt(m[1]) ?? 0;
-          if (norm.includes("pieza")) res[ubic].piezas += n;
-          else res[ubic].paquetes += n;
-          found = true;
-        }
+      for(const [alias,ubic] of Object.entries(ALIAS)){
+        const re=new RegExp(`(\\d+|\\w+)\\s*(?:paquetes?|piezas?)?\\s*(?:para|a|en)?\\s*${alias}`,"i");
+        const m=norm.match(re);
+        if(m){const n=wordsToNumber(m[1])??parseInt(m[1])??0; if(norm.includes("pieza")) res[ubic].piezas+=n; else res[ubic].paquetes+=n; found=true;}
       }
-      const corto = norm.match(/(\d+)\s*m\s*(\d+)\s*c\s*(\d+)\s*r/i) || norm.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (corto) {
-        res.M.paquetes = +corto[1] || 0;
-        res.C.paquetes = +corto[2] || 0;
-        res.R.paquetes = +corto[3] || 0;
-        found = true;
-      }
-      return found ? { ok:true, distribucion:res } : { ok:false };
+      const corto=norm.match(/(\d+)\s*m\s*(\d+)\s*c\s*(\d+)\s*r/i)||norm.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if(corto){res.M.paquetes=+corto[1]||0;res.C.paquetes=+corto[2]||0;res.R.paquetes=+corto[3]||0;found=true;}
+      return found?{ok:true,distribucion:res}:{ok:false};
     }
 
-    // ===================== IMAGEN =====================
-    async function procesarImagen(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = e => {
-          const img = new Image();
-          img.onload = () => {
-            const c = document.createElement("canvas");
-            c.width = 96; c.height = 96;
-            const ctx = c.getContext("2d");
-            const r = Math.max(96/img.width, 96/img.height);
-            ctx.drawImage(img, (96-img.width*r)/2, (96-img.height*r)/2, img.width*r, img.height*r);
-            c.toBlob(b => resolve(b), "image/webp", 0.7);
+    async function procesarImagen(file){
+      return new Promise((resolve)=>{
+        const reader=new FileReader();
+        reader.onload=e=>{
+          const img=new Image();
+          img.onload=()=>{
+            const c=document.createElement("canvas");
+            c.width=96;c.height=96;
+            const ctx=c.getContext("2d");
+            const r=Math.max(96/img.width,96/img.height);
+            ctx.drawImage(img,(96-img.width*r)/2,(96-img.height*r)/2,img.width*r,img.height*r);
+            c.toBlob(b=>resolve(b),"image/webp",0.7);
           };
-          img.src = e.target.result;
+          img.src=e.target.result;
         };
         reader.readAsDataURL(file);
       });
     }
-    async function subirImagen(blob) {
-      if (!supabase || !state.online) return null;
-      const path = `productos/${uid()}.webp`;
-      const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(path, blob, { contentType:"image/webp" });
-      if (error) throw error;
+    async function subirImagen(blob){
+      if(!supabase||!state.online) return null;
+      const path=`productos/${uid()}.webp`;
+      const {error}=await supabase.storage.from(STORAGE_BUCKET).upload(path,blob,{contentType:"image/webp"});
+      if(error) return null;
       return supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl;
     }
 
-    // ===================== AUTH + CONFIG =====================
-    async function login(codigo, pin) {
-      codigo = codigo.trim().toUpperCase();
-      if (supabase && state.online) {
-        const { data } = await supabase.from("usuarios").select("*").eq("id",codigo).eq("pin",pin).maybeSingle();
-        if (data) { await db.usuarios.put({...data, synced:true}); return data; }
+    async function login(codigo,pin){
+      codigo=codigo.trim().toUpperCase();
+      if(supabase&&state.online){
+        const {data}=await supabase.from("usuarios").select("*").eq("id",codigo).eq("pin",pin).maybeSingle();
+        if(data){await db.usuarios.put({...data,synced:true});return data;}
       }
-      const local = await db.usuarios.get(codigo);
-      return (local && local.pin === pin) ? local : null;
+      const local=await db.usuarios.get(codigo);
+      return (local&&local.pin===pin)?local:null;
     }
-    async function seed() {
-      if (await db.usuarios.count() === 0) {
+    async function seed(){
+      const count=await db.usuarios.count();
+      if(count===0){
         await db.usuarios.bulkPut([
-          {id:"ADMIN", pin:"1234", rol:"admin", synced:false},
-          {id:"M1", pin:"1111", rol:"sucursal", synced:false},
-          {id:"C1", pin:"4444", rol:"sucursal", synced:false},
-          {id:"R1", pin:"6666", rol:"sucursal", synced:false}
+          {id:"ADMIN",pin:"1234",rol:"admin",synced:false},
+          {id:"M1",pin:"1111",rol:"sucursal",synced:false},
+          {id:"M2",pin:"2222",rol:"sucursal",synced:false},
+          {id:"M3",pin:"3333",rol:"sucursal",synced:false},
+          {id:"C1",pin:"4444",rol:"sucursal",synced:false},
+          {id:"C2",pin:"5555",rol:"sucursal",synced:false},
+          {id:"R1",pin:"6666",rol:"sucursal",synced:false}
         ]);
       }
     }
-    async function getConfig(key, def="") {
-      const r = await db.config.get(key);
-      return r ? r.value : def;
-    }
-    async function setConfig(key, value) {
-      await db.config.put({key, value});
-    }
+    async function getConfig(key,def=""){const r=await db.config.get(key);return r?r.value:def;}
+    async function setConfig(key,value){await db.config.put({key,value});}
 
-    // ===================== RENDER =====================
-    function render() {
-      const app = $("#app");
-      app.innerHTML = "";
-      if (state.view === "login") { app.appendChild(renderLogin()); return; }
+    function render(){
+      const app=$("#app");
+      app.innerHTML="";
+      if(state.view==="login"){app.appendChild(renderLogin());return;}
       app.appendChild(renderHeader());
-      const main = el("main", {class:"pb-16 max-w-md mx-auto px-3 py-2"});
-      if (state.user.rol === "admin") {
-        if (state.view === "registro") main.appendChild(renderRegistro());
-        else if (state.view === "consultar") main.appendChild(renderConsultar());
-        else if (state.view === "reportes") main.appendChild(renderReportes());
+      const main=el("main",{class:"pb-16 max-w-md mx-auto px-3 py-2"});
+      if(state.user.rol==="admin"){
+        if(state.view==="registro") main.appendChild(renderRegistro());
+        else if(state.view==="consultar") main.appendChild(renderConsultar());
+        else if(state.view==="reportes") main.appendChild(renderReportes());
         else main.appendChild(renderConfig());
       } else {
-        if (state.view === "consultar") main.appendChild(renderConsultar());
+        if(state.view==="consultar") main.appendChild(renderConsultar());
         else main.appendChild(renderRecibir());
       }
       app.appendChild(main);
       app.appendChild(renderNav());
     }
 
-    function renderHeader() {
-      const h = el("header", {class:"bg-brand-900 text-white sticky top-0 z-40"});
-      const inner = el("div", {class:"max-w-md mx-auto px-3 py-2 flex justify-between items-center"});
-      inner.appendChild(el("div", {class:"flex items-center gap-2"},
-        el("span", {class:"font-bold"}, "MM"),
-        el("span", {class:"text-[10px] bg-brand-500 px-2 py-0.5 rounded-full"}, state.user.id)
+    function renderHeader(){
+      const h=el("header",{class:"bg-brand-900 text-white sticky top-0 z-40"});
+      const inner=el("div",{class:"max-w-md mx-auto px-3 py-2 flex justify-between items-center"});
+      inner.appendChild(el("div",{class:"flex items-center gap-2"},
+        el("span",{class:"font-bold"},"MM"),
+        el("span",{class:"text-[10px] bg-brand-500 px-2 py-0.5 rounded-full"},state.user.id)
       ));
-      const right = el("div", {class:"flex gap-1.5"});
-      right.appendChild(el("button", {class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg", onclick:()=>toast("Sincronizado","ok")}, "↻"));
-      right.appendChild(el("button", {class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg", onclick:()=>{state.user=null;state.view="login";render();}}, "Salir"));
+      const right=el("div",{class:"flex gap-1.5"});
+      right.appendChild(el("button",{class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg",onclick:()=>toast("Sincronizado")},"↻"));
+      right.appendChild(el("button",{class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg",onclick:()=>{state.user=null;state.view="login";render();}},"Salir"));
       inner.appendChild(right);
       h.appendChild(inner);
       return h;
     }
 
-    function renderNav() {
-      const nav = el("nav", {class:"fixed bottom-0 inset-x-0 bg-white border-t z-40"});
-      const wrap = el("div", {class:"max-w-md mx-auto grid grid-cols-4"});
-      const tabs = state.user.rol === "admin"
+    function renderNav(){
+      const nav=el("nav",{class:"fixed bottom-0 inset-x-0 bg-white border-t z-40"});
+      const wrap=el("div",{class:"max-w-md mx-auto grid grid-cols-4"});
+      const tabs=state.user.rol==="admin"
         ? [["registro","Registro","📦"],["consultar","Precios","🔍"],["reportes","Reportes","📊"],["config","Config","⚙️"]]
         : [["consultar","Precios","🔍"],["recibir","Recibir","📥"]];
-      tabs.forEach(([v,l,i]) => {
-        const active = state.view === v;
-        wrap.appendChild(el("button", {
-          class: `flex flex-col items-center py-2 ${active ? "text-brand-600" : "text-slate-400"}`,
-          onclick: () => { state.view = v; render(); }
-        }, el("span", {class:"text-lg"}, i), el("span", {class:"text-[10px]"}, l)));
+      tabs.forEach(([v,l,i])=>{
+        const active=state.view===v;
+        wrap.appendChild(el("button",{class:`flex flex-col items-center py-2 ${active?"text-brand-600":"text-slate-400"}`,onclick:()=>{state.view=v;render();}},
+          el("span",{class:"text-lg"},i), el("span",{class:"text-[10px]"},l)));
       });
       nav.appendChild(wrap);
       return nav;
     }
 
-    function renderLogin() {
-      const w = el("div", {class:"min-h-screen flex items-center justify-center bg-gradient-to-b from-brand-900 to-brand-700 px-6"});
-      const card = el("div", {class:"bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl"});
-      card.innerHTML = `
+    function renderLogin(){
+      const w=el("div",{class:"min-h-screen flex items-center justify-center bg-gradient-to-b from-brand-900 to-brand-700 px-6"});
+      const card=el("div",{class:"bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl"});
+      card.innerHTML=`
         <div class="text-center mb-5"><div class="text-4xl mb-1">📦</div><h1 class="text-xl font-extrabold">Distribución MM</h1></div>
         <input id="li-codigo" class="w-full mb-2 px-3 py-2.5 rounded-xl border uppercase outline-none text-sm" placeholder="Código" />
         <input id="li-pin" type="password" maxlength="4" inputmode="numeric" class="w-full mb-3 px-3 py-2.5 rounded-xl border text-center outline-none" placeholder="PIN" />
         <button id="li-btn" class="w-full bg-brand-600 text-white py-3 rounded-xl font-bold">Entrar</button>
         <p class="text-[10px] text-center text-slate-400 mt-2">ADMIN/1234 · M1/1111</p>`;
       w.appendChild(card);
-      setTimeout(() => {
-        $("#li-btn").onclick = async () => {
-          const u = await login($("#li-codigo").value, $("#li-pin").value);
-          if (u) { state.user = u; state.view = u.rol==="admin" ? "registro" : "consultar"; render(); toast("Bienvenido "+u.id); }
+      setTimeout(()=>{
+        $("#li-btn").onclick=async()=>{
+          const u=await login($("#li-codigo").value,$("#li-pin").value);
+          if(u){state.user=u;state.view=u.rol==="admin"?"registro":"consultar";render();toast("Bienvenido "+u.id);}
           else toast("Credenciales incorrectas","err");
         };
-      }, 0);
+      },0);
       return w;
     }
 
     // ===================== REGISTRO =====================
-    function renderRegistro() {
-      const wrap = el("div", {class:"space-y-2"});
-      const card = el("div", {class:"bg-white rounded-xl p-3 shadow-sm space-y-2.5"});
+    function renderRegistro(){
+      const wrap=el("div",{class:"space-y-2"});
+      const card=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2.5"});
 
-      card.innerHTML = `
-        <!-- Fila 1: Foto (es el botón) + Nombre -->
-        <div class="grid grid-cols-[4.5rem_1fr] gap-2 items-start">
-          <div id="foto-box" class="w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-xs font-semibold cursor-pointer select-none">
-            <span class="text-2xl">📷</span>
-            <span>Capturar</span>
+      card.innerHTML=`
+        <div class="grid grid-cols-[4.5rem_1fr] gap-2">
+          <div id="foto-box" class="w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-[11px] font-semibold cursor-pointer select-none">
+            <span class="text-xl">📷</span><span>Capturar</span>
           </div>
           <div class="space-y-1.5">
             <input id="p-nombre" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none" placeholder="Nombre del producto" />
-            <div class="grid grid-cols-[1fr_auto] gap-1.5">
-              <input id="p-codigo" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none uppercase" placeholder="Código (SC si vacío)" />
-              <button id="btn-dictar-nc" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-semibold whitespace-nowrap">🎙 Dictar</button>
+            <div class="flex gap-1.5">
+              <input id="p-codigo" class="flex-1 px-2.5 py-2 rounded-lg border text-sm outline-none uppercase" placeholder="Código" />
+              <button id="btn-dictar-nc" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg shrink-0">🎙</button>
             </div>
           </div>
         </div>
         <input id="foto-input" type="file" accept="image/*" capture="environment" class="hidden" />
 
-        <!-- Cantidades -->
-        <div class="grid grid-cols-[1fr_1fr_1fr_auto] gap-1.5 items-end">
-          <div>
-            <label class="text-[10px] text-slate-500 font-medium">Paquetes</label>
-            <input id="p-paquetes" type="number" value="0" class="w-full px-1.5 py-2 rounded-lg border text-center text-sm font-semibold" />
+        <div>
+          <div class="text-[11px] font-semibold text-slate-600 mb-1">Cantidades</div>
+          <div class="grid grid-cols-[1fr_1fr_1fr_auto] gap-1.5 items-center">
+            <input id="p-paquetes" type="number" value="0" class="px-1.5 py-2 rounded-lg border text-center text-sm font-semibold" placeholder="PQ" />
+            <input id="p-ppp" type="number" value="0" class="px-1.5 py-2 rounded-lg border text-center text-sm" placeholder="Pz/Pq" />
+            <input id="p-sueltas" type="number" value="0" class="px-1.5 py-2 rounded-lg border text-center text-sm" placeholder="Sueltas" />
+            <button id="btn-dictar-cant" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg">🎙</button>
           </div>
-          <div>
-            <label class="text-[10px] text-slate-500 font-medium">Pz / Paq</label>
-            <input id="p-ppp" type="number" value="0" class="w-full px-1.5 py-2 rounded-lg border text-center text-sm" />
-          </div>
-          <div>
-            <label class="text-[10px] text-slate-500 font-medium">Sueltas</label>
-            <input id="p-sueltas" type="number" value="0" class="w-full px-1.5 py-2 rounded-lg border text-center text-sm" />
-          </div>
-          <button id="btn-dictar-cant" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-semibold h-[42px]">🎙 Dictar</button>
+          <div id="p-total" class="text-xs font-semibold bg-brand-50 text-brand-800 rounded-lg px-2.5 py-1.5 mt-1.5">Total: 0 pz</div>
         </div>
-        <div id="p-total" class="text-xs font-semibold bg-brand-50 text-brand-800 rounded-lg px-2.5 py-1.5">Total: 0 pz</div>
 
-        <!-- Distribución -->
-        <div class="flex justify-between items-center">
-          <span class="text-xs font-bold text-brand-900">Distribución</span>
-          <button id="btn-dictar-dist" class="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-xs font-semibold">🎙 Dictar</button>
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <span class="text-[11px] font-semibold text-slate-600">Distribución</span>
+            <button id="btn-dictar-dist" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg">🎙</button>
+          </div>
+          <div class="grid grid-cols-3 gap-1.5">
+            <div class="bg-brand-50 rounded-lg p-1.5 text-center">
+              <div class="font-bold text-brand-700 text-sm">M</div>
+              <div class="flex gap-1 justify-center mt-1">
+                <input id="d-M-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs font-semibold" />
+                <input id="d-M-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" />
+              </div>
+            </div>
+            <div class="bg-brand-50 rounded-lg p-1.5 text-center">
+              <div class="font-bold text-brand-700 text-sm">C</div>
+              <div class="flex gap-1 justify-center mt-1">
+                <input id="d-C-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs font-semibold" />
+                <input id="d-C-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" />
+              </div>
+            </div>
+            <div class="bg-brand-50 rounded-lg p-1.5 text-center">
+              <div class="font-bold text-brand-700 text-sm">R</div>
+              <div class="flex gap-1 justify-center mt-1">
+                <input id="d-R-paq" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs font-semibold" />
+                <input id="d-R-pzs" type="number" value="0" class="w-10 px-1 py-1 rounded border text-center text-xs" />
+              </div>
+            </div>
+          </div>
+          <div id="d-validacion" class="text-xs font-medium text-amber-600 mt-1">Falta distribuir</div>
         </div>
-        <div class="grid grid-cols-3 gap-1.5">
-          <div class="bg-brand-50 rounded-lg p-1.5 text-center">
-            <div class="font-bold text-brand-700 text-sm mb-1">M</div>
-            <div class="flex gap-1 justify-center">
-              <input id="d-M-paq" type="number" value="0" class="w-11 px-1 py-1.5 rounded border text-center text-xs font-semibold" title="Paquetes" />
-              <input id="d-M-pzs" type="number" value="0" class="w-11 px-1 py-1.5 rounded border text-center text-xs" title="Piezas" />
-            </div>
-          </div>
-          <div class="bg-brand-50 rounded-lg p-1.5 text-center">
-            <div class="font-bold text-brand-700 text-sm mb-1">C</div>
-            <div class="flex gap-1 justify-center">
-              <input id="d-C-paq" type="number" value="0" class="w-11 px-1 py-1.5 rounded border text-center text-xs font-semibold" />
-              <input id="d-C-pzs" type="number" value="0" class="w-11 px-1 py-1.5 rounded border text-center text-xs" />
-            </div>
-          </div>
-          <div class="bg-brand-50 rounded-lg p-1.5 text-center">
-            <div class="font-bold text-brand-700 text-sm mb-1">R</div>
-            <div class="flex gap-1 justify-center">
-              <input id="d-R-paq" type="number" value="0" class="w-11 px-1 py-1.5 rounded border text-center text-xs font-semibold" />
-              <input id="d-R-pzs" type="number" value="0" class="w-11 px-1 py-1.5 rounded border text-center text-xs" />
-            </div>
-          </div>
-        </div>
-        <div id="d-validacion" class="text-xs font-medium text-amber-600">Falta distribuir</div>
 
-        <!-- Precio + Proveedor + Guardar -->
         <div class="grid grid-cols-[1fr_1fr_auto] gap-1.5 items-end">
           <div>
             <label class="text-[10px] text-slate-500">Precio</label>
@@ -417,325 +338,287 @@
       `;
       wrap.appendChild(card);
 
-      // Lista recientes
-      wrap.appendChild(el("div", {class:"text-sm font-bold text-brand-900 mt-1"}, "Registros recientes"));
-      const list = el("div", {id:"lista-reciente", class:"space-y-1 max-h-36 overflow-y-auto no-scrollbar"});
+      wrap.appendChild(el("div",{class:"text-sm font-bold text-brand-900 mt-1"},"Registros recientes"));
+      const list=el("div",{id:"lista-reciente",class:"space-y-1 max-h-40 overflow-y-auto no-scrollbar"});
       wrap.appendChild(list);
 
-      let fotoBlob = null;
-      let longPressTimer = null;
+      let fotoBlob=null;
 
-      setTimeout(async () => {
-        // Precargar
-        $("#p-proveedor").value = await getConfig("last_proveedor", "");
-        $("#p-nota-auto").textContent = hoyNota();
+      setTimeout(async()=>{
+        $("#p-proveedor").value=await getConfig("last_proveedor","");
+        $("#p-nota-auto").textContent=hoyNota();
 
         // Ceros desaparecen al focus
-        ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(sel => {
-          const inp = $(sel);
-          if (!inp) return;
-          inp.addEventListener("focus", () => { if (inp.value === "0") inp.value = ""; });
-          inp.addEventListener("blur", () => { if (inp.value === "") inp.value = "0"; });
+        ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(sel=>{
+          const inp=$(sel); if(!inp) return;
+          inp.addEventListener("focus",()=>{if(inp.value==="0")inp.value="";});
+          inp.addEventListener("blur",()=>{if(inp.value==="")inp.value="0";});
         });
 
-        const calc = () => {
-          const paq = +$("#p-paquetes").value || 0;
-          const ppp = +$("#p-ppp").value || 0;
-          const sue = +$("#p-sueltas").value || 0;
-          const total = paq * ppp + sue;
-          $("#p-total").textContent = `Total: ${total} pz`;
-
-          const dist = {
-            M: {paquetes:+$("#d-M-paq").value||0, piezas:+$("#d-M-pzs").value||0},
-            C: {paquetes:+$("#d-C-paq").value||0, piezas:+$("#d-C-pzs").value||0},
-            R: {paquetes:+$("#d-R-paq").value||0, piezas:+$("#d-R-pzs").value||0}
+        const calc=()=>{
+          const paq=+$("#p-paquetes").value||0;
+          const ppp=+$("#p-ppp").value||0;
+          const sue=+$("#p-sueltas").value||0;
+          const total=paq*ppp+sue;
+          $("#p-total").textContent=`Total: ${total} pz`;
+          const dist={
+            M:{paquetes:+$("#d-M-paq").value||0,piezas:+$("#d-M-pzs").value||0},
+            C:{paquetes:+$("#d-C-paq").value||0,piezas:+$("#d-C-pzs").value||0},
+            R:{paquetes:+$("#d-R-paq").value||0,piezas:+$("#d-R-pzs").value||0}
           };
-          const distTotal = UBICACIONES.reduce((s,u) => s + dist[u].paquetes*ppp + dist[u].piezas, 0);
-          const val = $("#d-validacion");
-          if (distTotal > total) { val.textContent = "Supera el total"; val.className = "text-xs font-medium text-red-600"; }
-          else if (distTotal === total && total > 0) { val.textContent = "Distribución completa"; val.className = "text-xs font-medium text-emerald-600"; }
-          else { val.textContent = "Falta distribuir"; val.className = "text-xs font-medium text-amber-600"; }
-          return { total, dist, ppp, paq, sue };
+          const distTotal=UBICACIONES.reduce((s,u)=>s+dist[u].paquetes*ppp+dist[u].piezas,0);
+          const val=$("#d-validacion");
+          if(distTotal>total){val.textContent="Supera el total";val.className="text-xs font-medium text-red-600 mt-1";}
+          else if(distTotal===total&&total>0){val.textContent="Distribución completa";val.className="text-xs font-medium text-emerald-600 mt-1";}
+          else{val.textContent="Falta distribuir";val.className="text-xs font-medium text-amber-600 mt-1";}
+          return {total,dist,ppp,paq,sue};
         };
-        ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"]
-          .forEach(s => $(s)?.addEventListener("input", calc));
+        ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(s=>$(s)?.addEventListener("input",calc));
 
-        // Foto: clic = capturar / long-press = borrar
-        const fotoBox = $("#foto-box");
-        fotoBox.onclick = () => $("#foto-input").click();
-        fotoBox.addEventListener("touchstart", e => {
-          longPressTimer = setTimeout(() => {
-            fotoBlob = null;
-            fotoBox.innerHTML = `<span class="text-2xl">📷</span><span>Capturar</span>`;
-            fotoBox.className = "w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-xs font-semibold cursor-pointer select-none";
+        // Foto
+        const fotoBox=$("#foto-box");
+        let longPress=null;
+        fotoBox.onclick=()=>$("#foto-input").click();
+        fotoBox.addEventListener("touchstart",()=>{
+          longPress=setTimeout(()=>{
+            fotoBlob=null;
+            fotoBox.innerHTML=`<span class="text-xl">📷</span><span>Capturar</span>`;
+            fotoBox.className="w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-[11px] font-semibold cursor-pointer select-none";
             toast("Foto eliminada");
-          }, 600);
+          },650);
         });
-        fotoBox.addEventListener("touchend", () => clearTimeout(longPressTimer));
-        fotoBox.addEventListener("touchmove", () => clearTimeout(longPressTimer));
+        fotoBox.addEventListener("touchend",()=>clearTimeout(longPress));
+        fotoBox.addEventListener("touchmove",()=>clearTimeout(longPress));
 
-        $("#foto-input").onchange = async e => {
-          const f = e.target.files[0];
-          if (!f) return;
-          fotoBlob = await procesarImagen(f);
-          fotoBox.innerHTML = `<img src="${URL.createObjectURL(fotoBlob)}" class="w-full h-full object-cover rounded-xl">`;
-          fotoBox.className = "w-[4.5rem] h-[4.5rem] rounded-xl overflow-hidden cursor-pointer";
+        $("#foto-input").onchange=async e=>{
+          const f=e.target.files[0]; if(!f) return;
+          fotoBlob=await procesarImagen(f);
+          fotoBox.innerHTML=`<img src="${URL.createObjectURL(fotoBlob)}" class="w-full h-full object-cover rounded-xl">`;
+          fotoBox.className="w-[4.5rem] h-[4.5rem] rounded-xl overflow-hidden cursor-pointer";
         };
 
-        // Dictados (independientes)
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        const startDict = (handler) => {
-          if (!SR) { toast("Sin soporte de voz","err"); return; }
-          const r = new SR();
-          r.lang = "es-MX";
-          r.onresult = e => handler(e.results[0][0].transcript);
-          r.onerror = () => toast("Error de voz","err");
-          r.start();
+        // Dictados independientes + confirmación clara
+        const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+        const dictar=(btn,handler)=>{
+          $(btn).onclick=()=>{
+            if(!SR){toast("Sin soporte de voz","err");return;}
+            const r=new SR(); r.lang="es-MX";
+            r.onresult=e=>{
+              const texto=e.results[0][0].transcript;
+              handler(texto);
+            };
+            r.onerror=()=>{}; // silenciar errores si ya hubo resultado
+            r.start();
+          };
         };
 
-        $("#btn-dictar-nc").onclick = () => startDict(texto => {
-          const { nombre, codigo } = parseNombreCodigo(texto);
-          $("#p-nombre").value = nombre;
-          $("#p-codigo").value = codigo;
-          toast(codigo === "SC" ? "Nombre capturado (sin código)" : "Nombre + Código capturados");
+        dictar("#btn-dictar-nc", texto=>{
+          const {nombre,codigo}=parseNombreCodigo(texto);
+          $("#p-nombre").value=nombre;
+          $("#p-codigo").value=codigo;
+          toast(codigo ? `Entendí: ${nombre} · ${codigo}` : `Entendí: ${nombre}`);
         });
 
-        $("#btn-dictar-cant").onclick = () => startDict(texto => {
-          const res = parseCantidades(texto);
-          if (res.ok) {
-            $("#p-paquetes").value = res.paquetes;
-            $("#p-ppp").value = res.ppp;
-            $("#p-sueltas").value = res.sueltas;
+        dictar("#btn-dictar-cant", texto=>{
+          const res=parseCantidades(texto);
+          if(res.ok){
+            $("#p-paquetes").value=res.paquetes;
+            $("#p-ppp").value=res.ppp;
+            $("#p-sueltas").value=res.sueltas;
             calc();
-            toast(`Cantidades: ${res.total} pz`);
-          } else toast("No entendí cantidades","warn");
+            toast(`Entendí: ${res.paquetes} paquetes con ${res.ppp} pz` + (res.sueltas?` + ${res.sueltas} sueltas`:"") );
+          } else toast("No entendí las cantidades","warn");
         });
 
-        $("#btn-dictar-dist").onclick = () => startDict(texto => {
-          const { total } = calc();
-          const res = parseDistribucion(texto, total);
-          if (res.ok) {
-            UBICACIONES.forEach(u => {
-              $(`#d-${u}-paq`).value = res.distribucion[u].paquetes;
-              $(`#d-${u}-pzs`).value = res.distribucion[u].piezas;
+        dictar("#btn-dictar-dist", texto=>{
+          const {total}=calc();
+          const res=parseDistribucion(texto,total);
+          if(res.ok){
+            UBICACIONES.forEach(u=>{
+              $(`#d-${u}-paq`).value=res.distribucion[u].paquetes;
+              $(`#d-${u}-pzs`).value=res.distribucion[u].piezas;
             });
             calc();
             toast("Distribución aplicada");
-          } else toast("No entendí distribución","warn");
+          } else toast("No entendí la distribución","warn");
         });
 
         // Guardar
-        $("#btn-guardar").onclick = async () => {
-          const nombre = $("#p-nombre").value.trim();
-          if (!nombre) { toast("Nombre obligatorio","err"); return; }
-          const { total, dist, ppp, paq, sue } = calc();
-          if (total <= 0) { toast("Indica cantidades","err"); return; }
+        $("#btn-guardar").onclick=async()=>{
+          const nombre=$("#p-nombre").value.trim();
+          if(!nombre){toast("Nombre obligatorio","err");return;}
+          const {total,dist,ppp,paq,sue}=calc();
+          if(total<=0){toast("Indica cantidades","err");return;}
 
-          let codigo = $("#p-codigo").value.trim().toUpperCase() || "SC";
-          const proveedor = $("#p-proveedor").value.trim();
-          const nota = hoyNota();
-          if (proveedor) await setConfig("last_proveedor", proveedor);
+          const codigo=$("#p-codigo").value.trim().toUpperCase();
+          const proveedor=$("#p-proveedor").value.trim();
+          const nota=hoyNota();
+          if(proveedor) await setConfig("last_proveedor",proveedor);
 
-          // Buscar existente por código o nombre
-          let prod = null;
-          if (codigo !== "SC") {
-            prod = await db.productos.where("codigo").equals(codigo).first();
-          }
-          if (!prod) {
-            const todos = await db.productos.toArray();
-            prod = todos.find(p => p.nombre.toLowerCase() === nombre.toLowerCase());
+          let prod=null;
+          if(codigo) prod=await db.productos.where("codigo").equals(codigo).first();
+          if(!prod){
+            const todos=await db.productos.toArray();
+            prod=todos.find(p=>p.nombre.toLowerCase()===nombre.toLowerCase());
           }
 
-          if (!prod) {
-            prod = {
-              id: uid(),
-              codigo,
-              nombre,
-              estado: "activo",
-              stock_total_bodega: total,
-              piezas_por_paquete: ppp,
-              precio_base: +$("#p-precio").value || null,
-              creado_en: new Date().toISOString(),
-              synced: false
+          if(!prod){
+            prod={
+              id:uid(), codigo:codigo||("P"+Date.now().toString().slice(-5)),
+              nombre, estado:"activo", stock_total_bodega:total,
+              piezas_por_paquete:ppp, precio_base:+$("#p-precio").value||null,
+              foto_url:null, creado_en:new Date().toISOString(), synced:false
             };
           } else {
-            prod.stock_total_bodega = (prod.stock_total_bodega || 0) + total;
-            prod.synced = false;
-            if ($("#p-precio").value) prod.precio_base = +$("#p-precio").value;
+            prod.stock_total_bodega=(prod.stock_total_bodega||0)+total;
+            if($("#p-precio").value) prod.precio_base=+$("#p-precio").value;
+            prod.synced=false;
           }
+
+          let fUrl=null;
+          if(fotoBlob){ try{fUrl=await subirImagen(fotoBlob);}catch(e){} }
+          if(fUrl) prod.foto_url=fUrl;
           await db.productos.put(prod);
 
-          let fUrl = null;
-          if (fotoBlob) {
-            try { fUrl = await subirImagen(fotoBlob); } catch(e) {}
-          }
-
-          const desglose = paq > 0 && ppp > 0
-            ? (sue > 0 ? `${paq} PQ CON ${ppp} PZ + ${sue} = ${total} PZ` : `${paq} PQ CON ${ppp} PZ = ${total} PZ`)
+          const desglose=paq>0&&ppp>0
+            ? (sue>0?`${paq} PQ CON ${ppp} PZ + ${sue} = ${total} PZ`:`${paq} PQ CON ${ppp} PZ = ${total} PZ`)
             : `${total} PZ`;
 
+          // Resumen de distribución para mostrar en app
+          const distTxt=UBICACIONES.map(u=>{
+            const d=dist[u];
+            const pz=d.paquetes*ppp+d.piezas;
+            return pz>0?`${u}:${pz}`:null;
+          }).filter(Boolean).join("  ");
+
           await db.compras.put({
-            id: uid(),
-            producto_id: prod.id,
-            codigo: prod.codigo,
-            nombre: prod.nombre,
-            fecha: new Date().toISOString().slice(0,10),
-            proveedor,
-            nota,
-            foto_url: fUrl,
-            paquetes: paq,
-            piezas_por_paquete: ppp,
-            piezas_sueltas: sue,
-            total_piezas: total,
-            desglose,
-            creado_en: new Date().toISOString(),
-            creado_por: state.user.id,
-            synced: false
+            id:uid(), producto_id:prod.id, codigo:prod.codigo, nombre:prod.nombre,
+            fecha:new Date().toISOString().slice(0,10), proveedor, nota,
+            foto_url:fUrl||prod.foto_url, paquetes:paq, piezas_por_paquete:ppp,
+            piezas_sueltas:sue, total_piezas:total, desglose, dist_resumen:distTxt,
+            creado_en:new Date().toISOString(), creado_por:state.user.id, synced:false
           });
 
-          // Crear envíos si hay distribución
-          for (const u of UBICACIONES) {
-            const pz = dist[u].paquetes * ppp + dist[u].piezas;
-            if (pz > 0) {
+          for(const u of UBICACIONES){
+            const pz=dist[u].paquetes*ppp+dist[u].piezas;
+            if(pz>0){
               await db.envios.put({
-                id: uid(),
-                producto_id: prod.id,
-                nombre: prod.nombre,
-                codigo: prod.codigo,
-                sucursal_destino: u,
-                total_enviado_piezas: pz,
-                paquetes_enviados: dist[u].paquetes,
-                piezas_sueltas_enviadas: dist[u].piezas,
-                estado: "ENVIADO",
-                fecha_envio: new Date().toISOString(),
-                synced: false
+                id:uid(), producto_id:prod.id, nombre:prod.nombre, codigo:prod.codigo,
+                foto_url:fUrl||prod.foto_url, sucursal_destino:u,
+                total_enviado_piezas:pz, paquetes_enviados:dist[u].paquetes,
+                piezas_sueltas_enviadas:dist[u].piezas, estado:"ENVIADO",
+                fecha_envio:new Date().toISOString(), synced:false
               });
             }
           }
 
           toast("Producto guardado");
-          // Limpiar (mantener proveedor)
-          $("#p-nombre").value = "";
-          $("#p-codigo").value = "";
-          $("#p-paquetes").value = 0;
-          $("#p-ppp").value = 0;
-          $("#p-sueltas").value = 0;
-          $("#p-precio").value = "";
-          UBICACIONES.forEach(u => { $(`#d-${u}-paq`).value = 0; $(`#d-${u}-pzs`).value = 0; });
-          fotoBlob = null;
-          fotoBox.innerHTML = `<span class="text-2xl">📷</span><span>Capturar</span>`;
-          fotoBox.className = "w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-xs font-semibold cursor-pointer select-none";
+          $("#p-nombre").value=""; $("#p-codigo").value="";
+          $("#p-paquetes").value=0; $("#p-ppp").value=0; $("#p-sueltas").value=0;
+          $("#p-precio").value="";
+          UBICACIONES.forEach(u=>{$(`#d-${u}-paq`).value=0;$(`#d-${u}-pzs`).value=0;});
+          fotoBlob=null;
+          fotoBox.innerHTML=`<span class="text-xl">📷</span><span>Capturar</span>`;
+          fotoBox.className="w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-[11px] font-semibold cursor-pointer select-none";
           calc();
-          cargarLista();
+          await cargarLista();
         };
 
-        async function cargarLista() {
-          const compras = await db.compras.orderBy("creado_en").reverse().limit(12).toArray();
-          list.innerHTML = compras.length ? compras.map(c => `
+        async function cargarLista(){
+          const compras=await db.compras.orderBy("creado_en").reverse().limit(15).toArray();
+          if(!compras.length){
+            list.innerHTML=`<p class="text-xs text-slate-400 text-center py-4">Sin registros aún</p>`;
+            return;
+          }
+          list.innerHTML=compras.map(c=>`
             <div class="bg-white rounded-lg p-2 shadow-sm flex gap-2 items-center text-xs" data-id="${c.id}">
-              ${c.foto_url
-                ? `<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`
-                : `<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center text-[10px]">📦</div>`}
+              ${c.foto_url?`<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
               <div class="flex-1 min-w-0">
                 <p class="font-semibold truncate">${escapeHtml(c.nombre)}</p>
-                <p class="text-slate-500">${c.desglose || c.total_piezas+" pz"} · ${c.nota || ""}</p>
+                <p class="text-slate-500">${c.desglose||c.total_piezas+" pz"}${c.dist_resumen?" · "+c.dist_resumen:""}</p>
               </div>
             </div>
-          `).join("") : `<p class="text-xs text-slate-400 text-center py-3">Sin registros aún</p>`;
+          `).join("");
 
-          // Long-press para eliminar
-          list.querySelectorAll("[data-id]").forEach(row => {
-            let timer;
-            row.addEventListener("touchstart", () => {
-              timer = setTimeout(async () => {
-                if (confirm("¿Eliminar este registro?")) {
+          list.querySelectorAll("[data-id]").forEach(row=>{
+            let t;
+            row.addEventListener("touchstart",()=>{
+              t=setTimeout(async()=>{
+                if(confirm("¿Eliminar este registro?")){
                   await db.compras.delete(row.dataset.id);
                   toast("Eliminado");
                   cargarLista();
                 }
-              }, 700);
+              },700);
             });
-            row.addEventListener("touchend", () => clearTimeout(timer));
-            row.addEventListener("touchmove", () => clearTimeout(timer));
+            row.addEventListener("touchend",()=>clearTimeout(t));
+            row.addEventListener("touchmove",()=>clearTimeout(t));
           });
         }
-        cargarLista();
+        await cargarLista();
         calc();
-      }, 0);
-
+      },0);
       return wrap;
     }
 
     // ===================== PRECIOS =====================
-    function renderConsultar() {
-      const wrap = el("div", {class:"space-y-2"});
-      wrap.appendChild(el("h2", {class:"text-base font-bold text-brand-900"}, "Consulta de precios"));
-      const search = el("input", {
-        type:"text", id:"c-search",
-        placeholder:"🔍 Nombre o código...",
-        class:"w-full px-3 py-2 rounded-xl border text-sm outline-none"
-      });
+    function renderConsultar(){
+      const wrap=el("div",{class:"space-y-2"});
+      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Consulta de precios"));
+      const search=el("input",{type:"text",id:"c-search",placeholder:"🔍 Nombre o código...",class:"w-full px-3 py-2 rounded-xl border text-sm outline-none"});
       wrap.appendChild(search);
-      const list = el("div", {id:"c-list", class:"space-y-1.5"});
+      const list=el("div",{id:"c-list",class:"space-y-1.5"});
       wrap.appendChild(list);
 
-      setTimeout(async () => {
-        const prods = await db.productos.orderBy("nombre").toArray();
-        const renderList = (q = "") => {
-          const filt = prods.filter(p =>
-            !q ||
-            (p.nombre||"").toLowerCase().includes(q.toLowerCase()) ||
-            (p.codigo||"").toLowerCase().includes(q.toLowerCase())
-          );
-          list.innerHTML = filt.length ? filt.map(p => `
+      setTimeout(async()=>{
+        const prods=await db.productos.orderBy("nombre").toArray();
+        const renderList=(q="")=>{
+          const filt=prods.filter(p=>!q||(p.nombre||"").toLowerCase().includes(q.toLowerCase())||(p.codigo||"").toLowerCase().includes(q.toLowerCase()));
+          list.innerHTML=filt.length?filt.map(p=>`
             <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center">
-              ${p.foto_url
-                ? `<img src="${p.foto_url}" class="w-11 h-11 rounded-lg object-cover">`
-                : `<div class="w-11 h-11 rounded-lg bg-slate-100 flex items-center justify-center text-sm">📦</div>`}
+              ${p.foto_url?`<img src="${p.foto_url}" class="w-11 h-11 rounded-lg object-cover">`:`<div class="w-11 h-11 rounded-lg bg-slate-100 flex items-center justify-center text-sm">📦</div>`}
               <div class="flex-1 min-w-0">
                 <p class="font-semibold text-sm truncate">${escapeHtml(p.nombre)}</p>
-                <p class="text-[10px] text-slate-500">${escapeHtml(p.codigo)}</p>
+                <p class="text-[10px] text-slate-500">${escapeHtml(p.codigo||"—")}</p>
               </div>
-              <p class="font-bold text-brand-600 text-sm">${p.precio_base != null ? "$"+Number(p.precio_base).toLocaleString("es-MX") : "—"}</p>
+              <div class="text-right">
+                <p class="font-bold text-sm ${p.precio_base!=null?"text-brand-600":"text-amber-500"}">${p.precio_base!=null?"$"+Number(p.precio_base).toLocaleString("es-MX"):"Pendiente"}</p>
+              </div>
             </div>
-          `).join("") : `<p class="text-xs text-slate-400 text-center py-6">Sin productos</p>`;
+          `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin productos</p>`;
         };
         renderList();
-        search.oninput = () => renderList(search.value);
-      }, 0);
+        search.oninput=()=>renderList(search.value);
+      },0);
       return wrap;
     }
 
     // ===================== REPORTES =====================
-    function renderReportes() {
-      const wrap = el("div", {class:"space-y-2"});
-      wrap.appendChild(el("h2", {class:"text-base font-bold text-brand-900"}, "Reportes"));
-
-      const tabs = el("div", {class:"flex gap-1.5"});
-      ["compra","traslado","diferencias"].forEach(t => {
-        tabs.appendChild(el("button", {
-          class: `px-3 py-1.5 rounded-full text-xs font-medium ${state.rtab===t ? "bg-brand-600 text-white" : "bg-white shadow text-slate-600"}`,
-          onclick: () => { state.rtab = t; render(); }
-        }, t.toUpperCase()));
+    function renderReportes(){
+      const wrap=el("div",{class:"space-y-2"});
+      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Reportes"));
+      const tabs=el("div",{class:"flex gap-1.5"});
+      ["compra","traslado","diferencias"].forEach(t=>{
+        tabs.appendChild(el("button",{
+          class:`px-3 py-1.5 rounded-full text-xs font-medium ${state.rtab===t?"bg-brand-600 text-white":"bg-white shadow text-slate-600"}`,
+          onclick:()=>{state.rtab=t;render();}
+        },t.toUpperCase()));
       });
       wrap.appendChild(tabs);
-
-      const body = el("div", {id:"rep-body", class:"mt-2 space-y-1.5"});
+      const body=el("div",{id:"rep-body",class:"mt-2 space-y-1.5"});
       wrap.appendChild(body);
 
-      setTimeout(async () => {
-        const tab = state.rtab || "compra";
-
-        if (tab === "compra") {
-          const compras = await db.compras.orderBy("fecha").reverse().toArray();
-          const porNota = {};
-          compras.forEach(c => {
-            const k = c.nota || "SIN-NOTA";
-            if (!porNota[k]) porNota[k] = { nota:k, proveedor:c.proveedor, fecha:c.fecha, items:[] };
+      setTimeout(async()=>{
+        const tab=state.rtab||"compra";
+        if(tab==="compra"){
+          const compras=await db.compras.orderBy("creado_en").reverse().toArray();
+          const porNota={};
+          compras.forEach(c=>{
+            const k=c.nota||"SIN-NOTA";
+            if(!porNota[k]) porNota[k]={nota:k,proveedor:c.proveedor,fecha:c.fecha,items:[]};
             porNota[k].items.push(c);
           });
-
-          body.innerHTML = Object.values(porNota).map(g => `
+          body.innerHTML=Object.values(porNota).map(g=>`
             <div class="bg-white rounded-xl p-3 shadow-sm">
               <div class="flex justify-between items-center mb-2">
                 <div>
@@ -744,114 +627,102 @@
                 </div>
                 <button data-nota="${g.nota}" class="btn-pdf px-2.5 py-1 bg-brand-600 text-white rounded-lg text-[10px] font-semibold">PDF</button>
               </div>
-              ${g.items.map(c => `
+              ${g.items.map(c=>`
                 <div class="flex gap-2 items-center py-1.5 border-t border-slate-100 text-xs">
-                  ${c.foto_url ? `<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">` : `<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
+                  ${c.foto_url?`<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
                   <div class="flex-1 min-w-0">
                     <p class="font-semibold truncate">${escapeHtml(c.nombre)}</p>
-                    <p class="text-slate-500">${escapeHtml(c.codigo)} · ${c.desglose || c.total_piezas+" pz"}</p>
+                    <p class="text-slate-500">${c.desglose||c.total_piezas+" pz"}</p>
+                    ${c.dist_resumen?`<p class="text-brand-600 text-[10px]">${c.dist_resumen}</p>`:""}
                   </div>
                 </div>
               `).join("")}
             </div>
-          `).join("") || `<p class="text-xs text-slate-400 text-center py-6">No hay compras</p>`;
+          `).join("")||`<p class="text-xs text-slate-400 text-center py-6">No hay compras</p>`;
 
-          body.querySelectorAll(".btn-pdf").forEach(btn => {
-            btn.onclick = () => generarPDFCompra(btn.dataset.nota, porNota[btn.dataset.nota]);
+          body.querySelectorAll(".btn-pdf").forEach(btn=>{
+            btn.onclick=()=>generarPDFCompra(btn.dataset.nota,porNota[btn.dataset.nota]);
           });
         }
-        else if (tab === "traslado") {
-          const envios = await db.envios.where("estado").equals("ENVIADO").toArray();
-          body.innerHTML = envios.length ? envios.map(e => `
-            <div class="bg-white rounded-xl p-3 shadow-sm text-xs">
-              <p class="font-semibold">${escapeHtml(e.nombre || "Producto")}</p>
-              <p class="text-slate-500">→ ${e.sucursal_destino} · ${e.total_enviado_piezas || 0} pz · ${e.estado}</p>
+        else if(tab==="traslado"){
+          const envios=await db.envios.where("estado").equals("ENVIADO").toArray();
+          // Agrupar por producto
+          const porProd={};
+          envios.forEach(e=>{
+            const k=e.producto_id||e.nombre;
+            if(!porProd[k]) porProd[k]={nombre:e.nombre,codigo:e.codigo,foto_url:e.foto_url,dist:[]};
+            porProd[k].dist.push(`${e.sucursal_destino}:${e.total_enviado_piezas}pz`);
+          });
+          body.innerHTML=Object.values(porProd).length?Object.values(porProd).map(p=>`
+            <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center text-xs">
+              ${p.foto_url?`<img src="${p.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold truncate">${escapeHtml(p.nombre)}</p>
+                <p class="text-slate-500">${p.dist.join("   ")}</p>
+              </div>
             </div>
-          `).join("") : `<p class="text-xs text-slate-400 text-center py-6">Nada en tránsito</p>`;
+          `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Nada en tránsito</p>`;
         }
-        else {
-          body.innerHTML = `<p class="text-xs text-slate-400 text-center py-6">Diferencias (próximamente)</p>`;
-        }
-      }, 0);
+        else body.innerHTML=`<p class="text-xs text-slate-400 text-center py-6">Diferencias (próximamente)</p>`;
+      },0);
       return wrap;
     }
 
-    function generarPDFCompra(nota, grupo) {
-      const w = window.open("", "_blank");
-      if (!w) { toast("Permite ventanas emergentes","warn"); return; }
-      const filas = grupo.items.map(c => `
+    function generarPDFCompra(nota,grupo){
+      const w=window.open("","_blank");
+      if(!w){toast("Permite ventanas emergentes","warn");return;}
+      const filas=grupo.items.map(c=>`
         <tr>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">
-            ${c.foto_url ? `<img src="${c.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">` : "📦"}
-          </td>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">
-            <b>${escapeHtml(c.nombre)}</b><br>
-            <span style="color:#64748b;font-size:12px;">${escapeHtml(c.codigo)}</span>
-          </td>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-size:13px;">
-            ${escapeHtml(c.desglose || (c.total_piezas + " pz"))}
-          </td>
-        </tr>
-      `).join("");
-
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${c.foto_url?`<img src="${c.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">`:"📦"}</td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(c.nombre)}</b><br><span style="color:#64748b;font-size:12px;">${escapeHtml(c.codigo)}</span></td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-size:13px;">${escapeHtml(c.desglose||c.total_piezas+" pz")}</td>
+        </tr>`).join("");
       w.document.write(`<!DOCTYPE html><html><head><title>COMPRA ${nota}</title>
-        <style>
-          body{font-family:Arial,sans-serif;padding:24px;color:#0f172a;}
-          h1{font-size:20px;margin:0 0 4px;}
-          .meta{color:#64748b;font-size:13px;margin-bottom:20px;}
-          table{width:100%;border-collapse:collapse;}
-          th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}
-        </style></head><body>
-          <h1>COMPRA ${escapeHtml(nota)}</h1>
-          <div class="meta">Proveedor: <b>${escapeHtml(grupo.proveedor||"—")}</b> · Fecha: ${grupo.fecha}</div>
-          <table>
-            <thead><tr><th>Foto</th><th>Producto</th><th>Cantidad</th></tr></thead>
-            <tbody>${filas}</tbody>
-          </table>
-          <script>setTimeout(()=>window.print(),400);<\/script>
-        </body></html>`);
+        <style>body{font-family:Arial,sans-serif;padding:24px;color:#0f172a;}h1{font-size:20px;margin:0 0 4px;}.meta{color:#64748b;font-size:13px;margin-bottom:20px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
+        <h1>COMPRA ${escapeHtml(nota)}</h1>
+        <div class="meta">Proveedor: <b>${escapeHtml(grupo.proveedor||"—")}</b> · Fecha: ${grupo.fecha}</div>
+        <table><thead><tr><th>Foto</th><th>Producto</th><th>Cantidad</th></tr></thead><tbody>${filas}</tbody></table>
+        <script>setTimeout(()=>window.print(),400);<\/script></body></html>`);
       w.document.close();
     }
 
-    // ===================== CONFIG USUARIOS =====================
-    function renderConfig() {
-      const wrap = el("div", {class:"space-y-3"});
-      wrap.appendChild(el("h2", {class:"text-base font-bold text-brand-900"}, "Usuarios"));
-
-      const list = el("div", {id:"user-list", class:"space-y-1.5"});
+    // ===================== CONFIG =====================
+    function renderConfig(){
+      const wrap=el("div",{class:"space-y-3"});
+      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Usuarios"));
+      const list=el("div",{id:"user-list",class:"space-y-1.5"});
       wrap.appendChild(list);
 
-      const form = el("div", {class:"bg-white rounded-xl p-3 shadow-sm space-y-2"});
-      form.innerHTML = `
-        <p class="text-xs font-semibold text-slate-600">Agregar usuario</p>
+      const form=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2"});
+      form.innerHTML=`
+        <p class="text-xs font-semibold text-slate-600">Agregar / Reiniciar PIN</p>
         <div class="grid grid-cols-2 gap-2">
-          <input id="nu-id" class="px-2.5 py-2 rounded-lg border text-sm uppercase outline-none" placeholder="Código (M2)" />
-          <input id="nu-pin" class="px-2.5 py-2 rounded-lg border text-sm text-center outline-none" placeholder="PIN 4 dígitos" maxlength="4" inputmode="numeric" />
+          <input id="nu-id" class="px-2.5 py-2 rounded-lg border text-sm uppercase outline-none" placeholder="Código" />
+          <input id="nu-pin" class="px-2.5 py-2 rounded-lg border text-sm text-center outline-none" placeholder="Nuevo PIN" maxlength="4" inputmode="numeric" />
         </div>
         <select id="nu-rol" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none">
           <option value="sucursal">Sucursal</option>
           <option value="admin">Admin</option>
         </select>
-        <button id="nu-save" class="w-full bg-brand-600 text-white py-2 rounded-lg text-sm font-bold">Agregar</button>
+        <button id="nu-save" class="w-full bg-brand-600 text-white py-2 rounded-lg text-sm font-bold">Guardar / Reiniciar PIN</button>
       `;
       wrap.appendChild(form);
 
-      setTimeout(async () => {
-        async function cargarUsers() {
-          const users = await db.usuarios.toArray();
-          list.innerHTML = users.map(u => `
+      setTimeout(async()=>{
+        async function cargarUsers(){
+          const users=await db.usuarios.toArray();
+          list.innerHTML=users.map(u=>`
             <div class="bg-white rounded-xl p-2.5 shadow-sm flex justify-between items-center text-sm">
               <div>
-                <p class="font-semibold">${escapeHtml(u.id)}</p>
-                <p class="text-[10px] text-slate-500">${u.rol}</p>
+                <p class="font-semibold">${escapeHtml(u.id)} ${u.id===state.user.id?"(tú)":""}</p>
+                <p class="text-[10px] text-slate-500">${u.rol} · PIN: ••••</p>
               </div>
-              <button data-id="${u.id}" class="del-user text-xs text-red-600 font-semibold">Eliminar</button>
+              ${u.id!==state.user.id?`<button data-id="${u.id}" class="del-user text-xs text-red-600 font-semibold">Eliminar</button>`:""}
             </div>
           `).join("");
-          list.querySelectorAll(".del-user").forEach(btn => {
-            btn.onclick = async () => {
-              if (btn.dataset.id === state.user.id) { toast("No puedes eliminarte","err"); return; }
-              if (confirm("¿Eliminar usuario " + btn.dataset.id + "?")) {
+          list.querySelectorAll(".del-user").forEach(btn=>{
+            btn.onclick=async()=>{
+              if(confirm("¿Eliminar "+btn.dataset.id+"?")){
                 await db.usuarios.delete(btn.dataset.id);
                 toast("Usuario eliminado");
                 cargarUsers();
@@ -861,34 +732,36 @@
         }
         cargarUsers();
 
-        $("#nu-save").onclick = async () => {
-          const id = $("#nu-id").value.trim().toUpperCase();
-          const pin = $("#nu-pin").value.trim();
-          const rol = $("#nu-rol").value;
-          if (!id || !/^\d{4}$/.test(pin)) { toast("Código y PIN de 4 dígitos","err"); return; }
-          if (await db.usuarios.get(id)) { toast("Ya existe","err"); return; }
-          await db.usuarios.put({ id, pin, rol, synced:false });
-          toast("Usuario " + id + " creado");
-          $("#nu-id").value = "";
-          $("#nu-pin").value = "";
+        $("#nu-save").onclick=async()=>{
+          const id=$("#nu-id").value.trim().toUpperCase();
+          const pin=$("#nu-pin").value.trim();
+          const rol=$("#nu-rol").value;
+          if(!id||!/^\d{4}$/.test(pin)){toast("Código y PIN de 4 dígitos","err");return;}
+          const existe=await db.usuarios.get(id);
+          if(existe){
+            existe.pin=pin;
+            existe.synced=false;
+            await db.usuarios.put(existe);
+            toast("PIN de "+id+" reiniciado");
+          } else {
+            await db.usuarios.put({id,pin,rol,synced:false});
+            toast("Usuario "+id+" creado");
+          }
+          $("#nu-id").value=""; $("#nu-pin").value="";
           cargarUsers();
         };
-      }, 0);
+      },0);
       return wrap;
     }
 
-    function renderRecibir() {
-      return el("div", {class:"p-3"},
-        el("h2", {class:"text-base font-bold mb-2"}, "Recibir"),
-        el("p", {class:"text-sm text-slate-500"}, "Confirmación de lote con una sola firma (próxima mejora).")
-      );
+    function renderRecibir(){
+      return el("div",{class:"p-3"},el("h2",{class:"text-base font-bold mb-2"},"Recibir"),el("p",{class:"text-sm text-slate-500"},"Confirmación de lote (próxima mejora)."));
     }
 
-    // ===================== INIT =====================
-    async function init() {
+    async function init(){
       await seed();
-      window.addEventListener("online", () => { state.online = true; });
-      window.addEventListener("offline", () => { state.online = false; });
+      window.addEventListener("online",()=>{state.online=true;});
+      window.addEventListener("offline",()=>{state.online=false;});
       render();
     }
     init();
