@@ -1,0 +1,8 @@
+{
+  "name": "Distribución MM",
+  "description": "Sistema de distribución, compras, traslados e inventario de bodega para sucursales.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

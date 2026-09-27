@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#0f172a" />
   <title>Distribución MM</title>
+  <meta name="description" content="Sistema de distribución, compras, traslados e inventario de bodega para sucursales." />
+  <meta property="og:title" content="Distribución MM" />
+  <meta property="og:description" content="Sistema de distribución, compras, traslados e inventario de bodega para sucursales." />
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -54,7 +57,39 @@
       config: "key"
     });
 
-    const state = { user:null, online:navigator.onLine, view:"login", toast:null, rtab:"compra", editId:null };
+    const savedUser = (()=>{
+      try { return JSON.parse(localStorage.getItem("bodega_user")||"null"); } catch(e){ return null; }
+    })();
+    const savedDraft = (()=>{
+      try { return JSON.parse(localStorage.getItem("bodega_draft")||"null"); } catch(e){ return null; }
+    })();
+
+    const state = {
+      user: savedUser,
+      online: navigator.onLine,
+      view: savedUser ? (savedUser.rol==="admin" ? "registro" : "consultar") : "login",
+      toast: null,
+      rtab: "compra",
+      preciosView: localStorage.getItem("bodega_precios_view") || "grid",
+      syncing: false,
+      draft: savedDraft || {
+        nombre: "", codigo: "", paquetes: 0, ppp: 0, sueltas: 0,
+        dMpaq: 0, dMpzs: 0, dCpaq: 0, dCpzs: 0, dRpaq: 0, dRpzs: 0,
+        precio: "", proveedor: "", fotoDataUrl: null
+      }
+    };
+
+    function saveDraft(){
+      try { localStorage.setItem("bodega_draft", JSON.stringify(state.draft)); } catch(e){}
+    }
+    function clearDraft(){
+      state.draft = {
+        nombre: "", codigo: "", paquetes: 0, ppp: 0, sueltas: 0,
+        dMpaq: 0, dMpzs: 0, dCpaq: 0, dCpzs: 0, dRpaq: 0, dRpzs: 0,
+        precio: "", proveedor: "", fotoDataUrl: null
+      };
+      localStorage.removeItem("bodega_draft");
+    }
 
     const $ = (s,r=document)=>r.querySelector(s);
     const el = (tag,props={},...kids)=>{
@@ -74,7 +109,7 @@
       const d=new Date();
       return "P"+String(d.getFullYear()).slice(2)+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0");
     };
-    const fmtMoney = n => (n!=null && n!=="") ? "$"+Number(n).toLocaleString("es-MX") : null;
+    const fmtMoney = n => (n!=null && n!=="") ? "$"+Math.round(Number(n)).toLocaleString("es-MX") : null;
 
     function toast(msg,type="ok"){
       state.toast={msg,type};
@@ -87,6 +122,892 @@
       if(!t){t=el("div",{id:"toast",class:"fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[92%] text-center"});document.body.appendChild(t);}
       t.className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 rounded-xl shadow-lg text-white text-sm font-medium max-w-[92%] text-center "+(state.toast.type==="ok"?"bg-emerald-600":state.toast.type==="warn"?"bg-amber-500":"bg-red-600");
       t.textContent=state.toast.msg;
+    }
+
+    // ===================== MODALES PERSONALIZADOS (SIN ALERT/CONFIRM/PROMPT) =====================
+    function showAdminConfirm(title, message, onConfirm){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[150] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"});
+      m.innerHTML = `
+        <div class="bg-white rounded-2xl p-5 w-full max-w-sm shadow-2xl space-y-3">
+          <div class="flex items-center gap-2 text-red-600 font-black text-sm">
+            <span class="text-xl">⚠️</span>
+            <span>${escapeHtml(title)}</span>
+          </div>
+          ${message ? `<p class="text-xs text-slate-600">${escapeHtml(message)}</p>` : ""}
+          <div class="flex gap-2 pt-2">
+            <button id="modal-cancel" class="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold">Cancelar</button>
+            <button id="modal-ok" class="flex-1 py-2.5 rounded-xl bg-red-600 text-white text-xs font-bold">Sí, confirmar</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+      m.querySelector("#modal-cancel").onclick = ()=>m.remove();
+      m.querySelector("#modal-ok").onclick = async ()=>{
+        m.remove();
+        if(onConfirm) await onConfirm();
+      };
+    }
+
+    // Modal enriquecido con Foto y Nombre prominente para asignación de precio en enteros sin centavos
+    function showPriceAssignModal(prod, onSave){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[160] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4",onclick:e=>{if(e.target===m)m.remove();}});
+      
+      const currentInt = prod.precio_base != null ? Math.round(Number(prod.precio_base)) : "";
+
+      m.innerHTML = `
+        <div class="bg-white rounded-3xl p-5 w-full max-w-sm shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
+          <!-- Encabezado con Foto y Nombre prominente del producto -->
+          <div class="flex items-center gap-3 pb-3 border-b border-slate-100">
+            <div class="w-16 h-16 rounded-2xl bg-slate-100 border border-slate-200/80 overflow-hidden shrink-0 flex items-center justify-center shadow-xs">
+              ${prod.foto_url ? `<img src="${prod.foto_url}" class="w-full h-full object-cover">` : `<span class="text-3xl">📦</span>`}
+            </div>
+            <div class="flex-1 min-w-0">
+              <span class="text-[10px] font-extrabold uppercase tracking-wider text-brand-600 bg-brand-50 px-2 py-0.5 rounded-full inline-block mb-1">Asignar Precio</span>
+              <h3 class="font-black text-slate-900 text-base leading-tight truncate" title="${escapeHtml(prod.nombre)}">${escapeHtml(prod.nombre)}</h3>
+              <div class="flex items-center gap-2 mt-1 text-xs text-slate-500 font-bold">
+                <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-mono">${escapeHtml(prod.codigo || "SIN CÓDIGO")}</span>
+                ${prod.stock_total_bodega ? `<span>· Stock: ${prod.stock_total_bodega} pz</span>` : ""}
+              </div>
+            </div>
+            <button id="modal-close-x" class="text-slate-400 hover:text-slate-700 text-xl font-bold p-1 leading-none">✕</button>
+          </div>
+
+          <!-- Input de Precio Entero Sin Centavos -->
+          <div>
+            <label class="block text-xs font-bold text-slate-600 mb-1.5">Precio de venta unitario (número entero en pesos):</label>
+            <div class="relative">
+              <span class="absolute left-3.5 top-3 text-slate-400 font-black text-xl">$</span>
+              <input id="modal-price-inp" type="number" step="1" min="0" inputmode="numeric" class="w-full pl-9 pr-3 py-3 rounded-2xl border-2 border-brand-500 font-black text-2xl text-slate-900 outline-none focus:border-brand-600 focus:ring-2 focus:ring-brand-200 transition-all" placeholder="0" value="${currentInt}" autofocus />
+            </div>
+            <p class="text-[11px] text-slate-500 mt-1 font-medium">Solo números enteros sin centavos (ej: 120, 250, 480).</p>
+          </div>
+
+          <!-- Botones de Acción -->
+          <div class="flex gap-2 pt-1">
+            <button id="modal-btn-cancel" class="flex-1 py-3 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold transition-all">Cancelar</button>
+            ${prod.precio_base ? `<button id="modal-btn-clear" class="px-3 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold transition-all">Quitar precio</button>` : ""}
+            <button id="modal-btn-save" class="flex-1 py-3 rounded-xl bg-brand-600 hover:bg-brand-700 active:scale-95 text-white text-xs font-black shadow-md shadow-brand-600/30 transition-all flex items-center justify-center gap-1.5">
+              <span>💾</span><span>Guardar Precio</span>
+            </button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+      const inp = m.querySelector("#modal-price-inp");
+      inp.focus();
+      inp.select();
+
+      m.querySelector("#modal-close-x").onclick = ()=>m.remove();
+      m.querySelector("#modal-btn-cancel").onclick = ()=>m.remove();
+
+      if(m.querySelector("#modal-btn-clear")){
+        m.querySelector("#modal-btn-clear").onclick = async ()=>{
+          m.remove();
+          if(onSave) await onSave(null);
+        };
+      }
+
+      const doSave = async ()=>{
+        const val = inp.value.trim();
+        m.remove();
+        const finalVal = val === "" ? null : Math.round(Number(val));
+        if(onSave) await onSave(finalVal);
+      };
+      m.querySelector("#modal-btn-save").onclick = doSave;
+      inp.onkeydown = e => { if(e.key === "Enter") doSave(); if(e.key === "Escape") m.remove(); };
+    }
+
+    function showNumericPrompt(title, currentVal, onSave){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[150] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"});
+      m.innerHTML = `
+        <div class="bg-white rounded-2xl p-5 w-full max-w-xs shadow-2xl space-y-3">
+          <h3 class="font-bold text-sm text-slate-800">${escapeHtml(title)}</h3>
+          <div class="relative">
+            <span class="absolute left-3 top-2.5 text-slate-400 font-bold">$</span>
+            <input id="num-modal-inp" type="number" step="1" min="0" inputmode="numeric" class="w-full pl-7 pr-3 py-2.5 rounded-xl border-2 border-brand-500 font-bold text-lg outline-none text-brand-900" placeholder="0" value="${currentVal!=null?Math.round(currentVal):""}" autofocus />
+          </div>
+          <div class="flex gap-2 pt-1">
+            <button id="modal-cancel" class="flex-1 py-2 rounded-xl border border-slate-200 text-slate-600 text-xs font-bold">Cancelar</button>
+            <button id="modal-clear" class="px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-xs font-semibold">Borrar</button>
+            <button id="modal-save" class="flex-1 py-2 rounded-xl bg-brand-600 text-white text-xs font-bold">Guardar</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+      const inp = m.querySelector("#num-modal-inp");
+      inp.focus();
+      inp.select();
+      m.querySelector("#modal-cancel").onclick = ()=>m.remove();
+      m.querySelector("#modal-clear").onclick = async ()=>{
+        m.remove();
+        if(onSave) await onSave(null);
+      };
+      const saveAction = async ()=>{
+        const v = inp.value.trim();
+        m.remove();
+        if(onSave) await onSave(v === "" ? null : Math.round(+v));
+      };
+      m.querySelector("#modal-save").onclick = saveAction;
+      inp.onkeydown = e => { if(e.key==="Enter") saveAction(); if(e.key==="Escape") m.remove(); };
+    }
+
+    // ===================== CÁMARA REAL EN VIVO CON VISOR =====================
+    async function openCameraDirectly(onPhotoTaken, onFallbackToInput){
+      // 1. Intentar usar la API de Cámara Web en Vivo (getUserMedia)
+      let currentFacing = "environment";
+      if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
+        try {
+          let stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: currentFacing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false
+          });
+          
+          const prev = $("#custom-modal");
+          if(prev) prev.remove();
+          const camModal = el("div",{id:"custom-modal",class:"fixed inset-0 z-[200] bg-black flex flex-col justify-between"});
+          camModal.innerHTML = `
+            <div class="p-3 flex justify-between items-center text-white bg-slate-950/80 z-10">
+              <span id="cam-title-lbl" class="text-xs font-bold flex items-center gap-1.5"><span>📸</span><span>Cámara Trasera</span></span>
+              <div class="flex items-center gap-2">
+                <button id="flip-live-cam" class="px-2.5 py-1.5 bg-white/20 hover:bg-white/30 rounded-xl text-xs font-bold flex items-center gap-1">🔄 Voltear</button>
+                <button id="close-live-cam" class="px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-xl text-xs font-bold">✕ Cerrar</button>
+              </div>
+            </div>
+            <div class="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+              <video id="live-cam-video" autoplay playsinline muted class="w-full h-full object-cover"></video>
+              <canvas id="live-cam-canvas" class="hidden"></canvas>
+            </div>
+            <div class="p-4 bg-slate-950/90 flex justify-around items-center z-10">
+              <button id="switch-cam-file" class="px-3 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl text-xs font-semibold">📁 Archivo</button>
+              <button id="snap-live-cam" class="w-16 h-16 rounded-full border-4 border-white bg-red-600 active:scale-95 shadow-lg flex items-center justify-center text-2xl transition-all">📸</button>
+              <div class="w-16"></div>
+            </div>
+          `;
+          document.body.appendChild(camModal);
+          
+          const video = camModal.querySelector("#live-cam-video");
+          video.srcObject = stream;
+          await video.play().catch(()=>{});
+
+          const stopStream = ()=>{
+            if(stream) stream.getTracks().forEach(t=>t.stop());
+            camModal.remove();
+          };
+
+          camModal.querySelector("#close-live-cam").onclick = stopStream;
+
+          camModal.querySelector("#flip-live-cam").onclick = async ()=>{
+            currentFacing = currentFacing === "environment" ? "user" : "environment";
+            if(stream) stream.getTracks().forEach(t=>t.stop());
+            try {
+              stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: { ideal: currentFacing } }, audio: false
+              });
+              video.srcObject = stream;
+              await video.play().catch(()=>{});
+              camModal.querySelector("#cam-title-lbl").innerHTML = `<span>📸</span><span>Cámara ${currentFacing==="user"?"Frontal":"Trasera"}</span>`;
+            } catch(e){}
+          };
+
+          camModal.querySelector("#switch-cam-file").onclick = ()=>{
+            stopStream();
+            if(onFallbackToInput) onFallbackToInput();
+          };
+
+          camModal.querySelector("#snap-live-cam").onclick = ()=>{
+            const canvas = camModal.querySelector("#live-cam-canvas");
+            const w = video.videoWidth || 640;
+            const h = video.videoHeight || 480;
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(video, 0, 0, w, h);
+            canvas.toBlob(async blob=>{
+              stopStream();
+              if(blob){
+                const optBlob = await procesarImagen(blob);
+                if(onPhotoTaken) onPhotoTaken(optBlob || blob);
+              }
+            }, "image/jpeg", 0.85);
+          };
+          return;
+        } catch(err){
+          console.warn("getUserMedia no disponible o denegado, recurriendo al selector nativo", err);
+        }
+      }
+      
+      // 2. Si no hay getUserMedia o fue denegado, abrir el input con capture="environment"
+      if(onFallbackToInput) onFallbackToInput();
+    }
+
+    // ===================== PERSISTENCIA Y SINCRONIZACIÓN AUTOMÁTICA SERVER-SIDE =====================
+    async function syncAllToServer(){
+      try {
+        const payload = {
+          productos: await db.productos.toArray(),
+          compras: await db.compras.toArray(),
+          envios: await db.envios.toArray(),
+          recepciones: await db.recepciones.toArray(),
+          usuarios: await db.usuarios.toArray()
+        };
+        const res = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        return res.ok;
+      } catch(e){
+        return false;
+      }
+    }
+
+    async function syncAllFromServer(){
+      try {
+        const res = await fetch("/api/sync");
+        if(res.ok){
+          const data = await res.json();
+          if(data && typeof data === "object"){
+            if(Array.isArray(data.deleted_productos)){
+              for(const id of data.deleted_productos) await db.productos.delete(id);
+            }
+            if(Array.isArray(data.deleted_compras)){
+              for(const id of data.deleted_compras) await db.compras.delete(id);
+            }
+            if(Array.isArray(data.deleted_envios)){
+              for(const id of data.deleted_envios) await db.envios.delete(id);
+            }
+            if(Array.isArray(data.productos) && data.productos.length > 0){
+              for(const p of data.productos) await db.productos.put(p);
+            }
+            if(Array.isArray(data.compras) && data.compras.length > 0){
+              for(const c of data.compras) await db.compras.put(c);
+            }
+            if(Array.isArray(data.envios) && data.envios.length > 0){
+              for(const ev of data.envios) await db.envios.put(ev);
+            }
+            if(Array.isArray(data.recepciones) && data.recepciones.length > 0){
+              for(const r of data.recepciones) await db.recepciones.put(r);
+            }
+            return true;
+          }
+        }
+      } catch(e){}
+      return false;
+    }
+
+    async function deleteProductRecord(prodId){
+      if(!prodId) return;
+      await db.productos.delete(prodId);
+
+      // Eliminar también compras asociadas para que no sigan apareciendo en recientes
+      const allCompras = await db.compras.where("producto_id").equals(prodId).toArray();
+      const cIds = allCompras.map(x=>x.id);
+      for(const cid of cIds) await db.compras.delete(cid);
+
+      // Eliminar envíos asociados
+      const allEnvios = await db.envios.where("producto_id").equals(prodId).toArray();
+      const evIds = allEnvios.map(x=>x.id);
+      for(const eid of evIds) await db.envios.delete(eid);
+
+      // Guardar en blacklist local para evitar resurrecciones
+      const deletedSet = new Set(JSON.parse(localStorage.getItem("bodega_deleted_ids") || "[]"));
+      deletedSet.add(prodId);
+      cIds.forEach(id => deletedSet.add(id));
+      localStorage.setItem("bodega_deleted_ids", JSON.stringify(Array.from(deletedSet)));
+
+      try {
+        await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deleted_productos: [prodId],
+            deleted_compras: cIds,
+            deleted_envios: evIds
+          })
+        });
+      } catch(e){}
+      await syncAllToServer();
+    }
+
+    async function deleteRecentCompra(compraId){
+      if(!compraId) return;
+      const c = await db.compras.get(compraId);
+      await db.compras.delete(compraId);
+
+      if(c && c.producto_id){
+        const envios = await db.envios.where("producto_id").equals(c.producto_id).toArray();
+        for(const ev of envios){
+          if(ev.estado !== "RECIBIDO") await db.envios.delete(ev.id);
+        }
+      }
+
+      const deletedSet = new Set(JSON.parse(localStorage.getItem("bodega_deleted_ids") || "[]"));
+      deletedSet.add(compraId);
+      localStorage.setItem("bodega_deleted_ids", JSON.stringify(Array.from(deletedSet)));
+
+      try {
+        await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deleted_compras: [compraId] })
+        });
+      } catch(e){}
+      await syncAllToServer();
+    }
+
+    // Modal para redistribuir o asignar distribución pendiente en cualquier momento
+    async function showRedistributionModal(compra, onUpdated){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      
+      const p = await db.productos.get(compra.producto_id) || {
+        id: compra.producto_id,
+        nombre: compra.nombre,
+        codigo: compra.codigo,
+        foto_url: compra.foto_url
+      };
+
+      const total = compra.total_piezas || (compra.paquetes * compra.piezas_por_paquete + compra.piezas_sueltas) || 0;
+      const paq = compra.paquetes || 0;
+      const ppp = compra.piezas_por_paquete || 0;
+      const sue = compra.piezas_sueltas || 0;
+
+      // Buscar envíos existentes para pre-llenar valores actuales
+      const existingEnvios = await db.envios.where("producto_id").equals(compra.producto_id).toArray();
+      const distInit = {
+        M: { paq: 0, pzs: 0 },
+        C: { paq: 0, pzs: 0 },
+        R: { paq: 0, pzs: 0 }
+      };
+      existingEnvios.forEach(ev=>{
+        if(distInit[ev.sucursal_destino]){
+          distInit[ev.sucursal_destino].paq = ev.paquetes_enviados || 0;
+          distInit[ev.sucursal_destino].pzs = ev.piezas_sueltas_enviadas || 0;
+        }
+      });
+
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[160] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto",onclick:e=>{if(e.target===m)m.remove();}});
+      
+      m.innerHTML = `
+        <div class="bg-white rounded-3xl p-4 sm:p-5 w-full max-w-md shadow-2xl space-y-3.5 my-auto animate-in fade-in zoom-in-95">
+          <!-- Encabezado con Foto y Nombre -->
+          <div class="flex items-center gap-3 pb-3 border-b border-slate-100">
+            <div class="w-14 h-14 rounded-2xl bg-slate-100 border border-slate-200/80 overflow-hidden shrink-0 flex items-center justify-center shadow-xs">
+              ${p.foto_url || compra.foto_url ? `<img src="${p.foto_url || compra.foto_url}" class="w-full h-full object-cover">` : `<span class="text-2xl">📦</span>`}
+            </div>
+            <div class="flex-1 min-w-0">
+              <span class="text-[10px] font-extrabold uppercase tracking-wider text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full inline-block mb-1">🚚 Redistribución</span>
+              <h3 class="font-black text-slate-900 text-sm sm:text-base leading-tight truncate" title="${escapeHtml(p.nombre)}">${escapeHtml(p.nombre)}</h3>
+              <p class="text-xs text-slate-500 font-bold mt-0.5">${escapeHtml(p.codigo || "—")} · Total: <b class="text-brand-700">${total} pz</b> ${compra.desglose ? `(${compra.desglose})` : ""}</p>
+            </div>
+            <button id="modal-close-dist" class="text-slate-400 hover:text-slate-700 text-xl font-bold p-1 leading-none">✕</button>
+          </div>
+
+          <!-- Estado de Validación -->
+          <div class="flex justify-between items-center bg-slate-50 px-3 py-2 rounded-xl border border-slate-200/80">
+            <span class="text-xs font-bold text-slate-700">Validación de piezas:</span>
+            <span id="redist-val" class="text-xs font-black text-amber-600">Calculando...</span>
+          </div>
+
+          <!-- Inputs de Distribución -->
+          <div class="grid grid-cols-3 gap-2">
+            <!-- M -->
+            <div class="bg-white rounded-xl p-2 border-2 border-blue-200 text-center shadow-xs space-y-1">
+              <div class="flex items-center justify-center gap-1">
+                <span class="w-6 h-6 rounded-lg bg-blue-600 text-white font-black text-xs flex items-center justify-center">M</span>
+                <span class="text-[10px] font-bold text-blue-900">Misaki</span>
+              </div>
+              <div class="grid grid-cols-2 gap-1 text-[9px] font-bold text-slate-400"><span>PQ</span><span>PZ</span></div>
+              <div class="grid grid-cols-2 gap-1">
+                <input id="rd-M-paq" type="number" inputmode="numeric" value="${distInit.M.paq}" class="h-10 w-full rounded-lg border border-slate-300 text-center text-xs font-black text-slate-800 outline-none focus:border-blue-600" />
+                <input id="rd-M-pzs" type="number" inputmode="numeric" value="${distInit.M.pzs}" class="h-10 w-full rounded-lg border border-slate-300 text-center text-xs font-black text-slate-800 outline-none focus:border-blue-600" />
+              </div>
+            </div>
+
+            <!-- C -->
+            <div class="bg-white rounded-xl p-2 border-2 border-purple-200 text-center shadow-xs space-y-1">
+              <div class="flex items-center justify-center gap-1">
+                <span class="w-6 h-6 rounded-lg bg-purple-600 text-white font-black text-xs flex items-center justify-center">C</span>
+                <span class="text-[10px] font-bold text-purple-900">Chilte</span>
+              </div>
+              <div class="grid grid-cols-2 gap-1 text-[9px] font-bold text-slate-400"><span>PQ</span><span>PZ</span></div>
+              <div class="grid grid-cols-2 gap-1">
+                <input id="rd-C-paq" type="number" inputmode="numeric" value="${distInit.C.paq}" class="h-10 w-full rounded-lg border border-slate-300 text-center text-xs font-black text-slate-800 outline-none focus:border-purple-600" />
+                <input id="rd-C-pzs" type="number" inputmode="numeric" value="${distInit.C.pzs}" class="h-10 w-full rounded-lg border border-slate-300 text-center text-xs font-black text-slate-800 outline-none focus:border-purple-600" />
+              </div>
+            </div>
+
+            <!-- R -->
+            <div class="bg-white rounded-xl p-2 border-2 border-emerald-200 text-center shadow-xs space-y-1">
+              <div class="flex items-center justify-center gap-1">
+                <span class="w-6 h-6 rounded-lg bg-emerald-600 text-white font-black text-xs flex items-center justify-center">R</span>
+                <span class="text-[10px] font-bold text-emerald-900">Rdgz</span>
+              </div>
+              <div class="grid grid-cols-2 gap-1 text-[9px] font-bold text-slate-400"><span>PQ</span><span>PZ</span></div>
+              <div class="grid grid-cols-2 gap-1">
+                <input id="rd-R-paq" type="number" inputmode="numeric" value="${distInit.R.paq}" class="h-10 w-full rounded-lg border border-slate-300 text-center text-xs font-black text-slate-800 outline-none focus:border-emerald-600" />
+                <input id="rd-R-pzs" type="number" inputmode="numeric" value="${distInit.R.pzs}" class="h-10 w-full rounded-lg border border-slate-300 text-center text-xs font-black text-slate-800 outline-none focus:border-emerald-600" />
+              </div>
+            </div>
+          </div>
+
+          <!-- Sugerencias rápidas con prioridad de paquetes -->
+          <div class="bg-blue-50/80 border border-blue-200/80 rounded-xl p-2.5 space-y-1.5">
+            <div class="flex items-center justify-between text-[11px] font-bold text-blue-900">
+              <span>💡 Sugerencias (priorizan paquetes enteros):</span>
+              <button id="btn-dictar-redist" class="text-blue-700 hover:text-blue-900 font-extrabold flex items-center gap-1">
+                <span>🎙</span><span>Dictar voz</span>
+              </button>
+            </div>
+            <div class="flex flex-wrap gap-1">
+              <button type="button" class="btn-rd-chip px-2 py-1 bg-white border border-blue-300 hover:bg-blue-100 rounded-lg text-[10px] font-bold text-blue-900 shadow-2xs" data-cmd="partes iguales">
+                ✨ Partes iguales (prioriza paq.)
+              </button>
+              <button type="button" class="btn-rd-chip px-2 py-1 bg-white border border-blue-300 hover:bg-blue-100 rounded-lg text-[10px] font-bold text-blue-900 shadow-2xs" data-cmd="mitad y mitad M y C">
+                🌓 Mitad M y C
+              </button>
+              <button type="button" class="btn-rd-chip px-2 py-1 bg-white border border-blue-300 hover:bg-blue-100 rounded-lg text-[10px] font-bold text-blue-900 shadow-2xs" data-cmd="dos para cada quien y una más a Rodriguez">
+                📦 2 c/u y 1 más a R
+              </button>
+            </div>
+          </div>
+
+          <!-- Botones de Acción -->
+          <div class="flex gap-2 pt-1 border-t border-slate-100">
+            <button id="btn-cancel-redist" class="flex-1 py-2.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold">Cancelar</button>
+            <button id="btn-save-redist" class="flex-1 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 active:scale-95 text-white text-xs font-black shadow-md shadow-brand-600/30 flex items-center justify-center gap-1">
+              <span>💾</span><span>Guardar Distribución</span>
+            </button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+
+      const calcRedist = ()=>{
+        const pppVal = ppp || (compra.piezas_por_paquete || 0);
+        const dM = { paq: +m.querySelector("#rd-M-paq").value || 0, pzs: +m.querySelector("#rd-M-pzs").value || 0 };
+        const dC = { paq: +m.querySelector("#rd-C-paq").value || 0, pzs: +m.querySelector("#rd-C-pzs").value || 0 };
+        const dR = { paq: +m.querySelector("#rd-R-paq").value || 0, pzs: +m.querySelector("#rd-R-pzs").value || 0 };
+        const sumPzs = (dM.paq * pppVal + dM.pzs) + (dC.paq * pppVal + dC.pzs) + (dR.paq * pppVal + dR.pzs);
+        const valLbl = m.querySelector("#redist-val");
+        if(sumPzs > total){
+          valLbl.textContent = `⚠️ Supera total (${sumPzs}/${total} pz)`;
+          valLbl.className = "text-xs font-black text-red-600";
+        } else if(sumPzs === total && total > 0){
+          valLbl.textContent = `✓ Exacto (${sumPzs}/${total} pz)`;
+          valLbl.className = "text-xs font-black text-emerald-600";
+        } else {
+          valLbl.textContent = `Faltan distribuir ${total - sumPzs} pz (${sumPzs}/${total})`;
+          valLbl.className = "text-xs font-black text-amber-600";
+        }
+        return { dM, dC, dR, sumPzs, pppVal };
+      };
+
+      m.querySelectorAll("input").forEach(inp=>inp.addEventListener("input", calcRedist));
+      calcRedist();
+
+      const applyCmd = cmd => {
+        const res = parseDistribucion(cmd, total, paq, ppp, sue);
+        if(res.ok){
+          m.querySelector("#rd-M-paq").value = res.distribucion.M.paquetes;
+          m.querySelector("#rd-M-pzs").value = res.distribucion.M.piezas;
+          m.querySelector("#rd-C-paq").value = res.distribucion.C.paquetes;
+          m.querySelector("#rd-C-pzs").value = res.distribucion.C.piezas;
+          m.querySelector("#rd-R-paq").value = res.distribucion.R.paquetes;
+          m.querySelector("#rd-R-pzs").value = res.distribucion.R.piezas;
+          calcRedist();
+          toast(res.msg || "Distribución calculada");
+        } else {
+          toast("No se pudo calcular la distribución", "warn");
+        }
+      };
+
+      m.querySelectorAll(".btn-rd-chip").forEach(b=>{
+        b.onclick = ()=>applyCmd(b.dataset.cmd);
+      });
+
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if(m.querySelector("#btn-dictar-redist")){
+        m.querySelector("#btn-dictar-redist").onclick = ()=>{
+          if(!SR){ toast("Sin soporte de voz en este navegador", "err"); return; }
+          const r = new SR(); r.lang = "es-MX";
+          toast("🎙️ Di: «partes iguales», «mitad y mitad» o «dos para cada quien...»");
+          r.onresult = e => applyCmd(e.results[0][0].transcript);
+          r.start();
+        };
+      }
+
+      m.querySelector("#modal-close-dist").onclick = ()=>m.remove();
+      m.querySelector("#btn-cancel-redist").onclick = ()=>m.remove();
+
+      m.querySelector("#btn-save-redist").onclick = async ()=>{
+        const { dM, dC, dR, sumPzs, pppVal } = calcRedist();
+        if(sumPzs > total){
+          toast(`La distribución excede el total (${sumPzs}/${total} pz)`, "err");
+          return;
+        }
+
+        const distMap = { M: dM, C: dC, R: dR };
+        const distTxt = UBICACIONES.map(u=>{
+          const d = distMap[u];
+          const pz = d.paq * pppVal + d.pzs;
+          return pz > 0 ? `${u}:${pz}` : null;
+        }).filter(Boolean).join("  ");
+
+        // Actualizar registro de compra
+        compra.dist_resumen = distTxt;
+        compra.synced = false;
+        await db.compras.put(compra);
+
+        // Reemplazar envíos asociados para que reflejen la nueva distribución
+        const oldEnvios = await db.envios.where("producto_id").equals(compra.producto_id).toArray();
+        for(const ev of oldEnvios){
+          if(ev.estado !== "RECIBIDO") await db.envios.delete(ev.id);
+        }
+
+        for(const u of UBICACIONES){
+          const pz = distMap[u].paq * pppVal + distMap[u].pzs;
+          if(pz > 0){
+            await db.envios.put({
+              id: uid(), producto_id: compra.producto_id, nombre: p.nombre, codigo: p.codigo,
+              foto_url: p.foto_url || compra.foto_url, sucursal_destino: u,
+              total_enviado_piezas: pz, paquetes_enviados: distMap[u].paq,
+              piezas_sueltas_enviadas: distMap[u].pzs, estado: "ENVIADO",
+              fecha_envio: new Date().toISOString(), synced: false
+            });
+          }
+        }
+
+        await syncAllToServer();
+        m.remove();
+        toast("Distribución guardada correctamente");
+        if(onUpdated) onUpdated();
+        render();
+      };
+    }
+
+    // Menú de opciones enriquecido para registros recientes
+    function showRecentMenu(compra, prod, onUpdated, onDeleted){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[150] bg-slate-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-4",onclick:e=>{if(e.target===m)m.remove();}});
+      
+      const foto = prod.foto_url || compra.foto_url;
+      m.innerHTML = `
+        <div class="bg-white rounded-3xl p-4 w-full max-w-sm shadow-2xl space-y-2 animate-in fade-in slide-in-from-bottom-4">
+          <div class="flex items-center gap-3 pb-2.5 border-b border-slate-100">
+            <div class="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden shrink-0 flex items-center justify-center shadow-xs">
+              ${foto ? `<img src="${foto}" class="w-full h-full object-cover">` : `<span class="text-xl">📦</span>`}
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="font-extrabold text-sm text-slate-800 truncate">${escapeHtml(prod.nombre)}</p>
+              <div class="flex items-center gap-1.5 text-xs text-slate-500 font-bold mt-0.5">
+                <span class="bg-slate-100 px-1.5 py-0.5 rounded font-mono text-[11px]">${escapeHtml(prod.codigo||"—")}</span>
+                <span class="text-brand-700">${prod.precio_base ? fmtMoney(prod.precio_base) : "Sin precio"}</span>
+              </div>
+            </div>
+            <button id="close-recent-menu" class="text-slate-400 hover:text-slate-700 text-lg px-2">✕</button>
+          </div>
+
+          <div class="space-y-1 pt-1">
+            <button id="rmenu-edit-price" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-brand-700 flex items-center gap-2.5">
+              <span>💲</span><span>Asignar / Cambiar precio</span>
+            </button>
+
+            <button id="rmenu-redist" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-blue-700 flex items-center gap-2.5">
+              <span>🚚</span><span>Asignar / Cambiar distribución de sucursales</span>
+            </button>
+
+            <button id="rmenu-cam-photo" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-slate-700 flex items-center gap-2.5">
+              <span>📸</span><span>${foto ? "Tomar nueva foto con cámara" : "Tomar foto con cámara"}</span>
+            </button>
+
+            <button id="rmenu-file-photo" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-slate-700 flex items-center gap-2.5">
+              <span>📁</span><span>Elegir foto de galería / archivo</span>
+            </button>
+
+            ${foto ? `
+            <button id="rmenu-view-photo" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-slate-700 flex items-center gap-2.5">
+              <span>🔍</span><span>Ver foto en grande</span>
+            </button>` : ""}
+
+            <div class="pt-1.5 border-t border-slate-100 space-y-1">
+              <button id="rmenu-delete-compra" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-amber-50 text-xs font-bold text-amber-700 flex items-center gap-2.5">
+                <span>🗑️</span><span>Quitar este registro de compras recientes</span>
+              </button>
+
+              <button id="rmenu-delete-prod" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-red-50 text-xs font-bold text-red-600 flex items-center gap-2.5">
+                <span>⚠️</span><span>Eliminar producto por completo del catálogo</span>
+              </button>
+            </div>
+          </div>
+          <input id="rmenu-file-input" type="file" accept="image/*" class="hidden" />
+        </div>
+      `;
+      document.body.appendChild(m);
+      m.querySelector("#close-recent-menu").onclick = ()=>m.remove();
+
+      m.querySelector("#rmenu-edit-price").onclick = ()=>{
+        m.remove();
+        showPriceAssignModal(prod, async newVal=>{
+          prod.precio_base = newVal;
+          prod.synced = false;
+          await db.productos.put(prod);
+          await syncAllToServer();
+          toast("Precio actualizado");
+          if(onUpdated) onUpdated();
+        });
+      };
+
+      m.querySelector("#rmenu-redist").onclick = ()=>{
+        m.remove();
+        showRedistributionModal(compra, onUpdated);
+      };
+
+      const applyPhoto = async blob => {
+        if(!blob) return;
+        const localUrl = URL.createObjectURL(blob);
+        prod.foto_url = localUrl;
+        compra.foto_url = localUrl;
+        prod.synced = false;
+        compra.synced = false;
+        await db.productos.put(prod);
+        await db.compras.put(compra);
+        await syncAllToServer();
+        if(onUpdated) onUpdated();
+        toast("Foto actualizada");
+        try {
+          const rUrl = await subirImagen(blob);
+          if(rUrl){
+            prod.foto_url = rUrl;
+            compra.foto_url = rUrl;
+            await db.productos.put(prod);
+            await db.compras.put(compra);
+            await syncAllToServer();
+          }
+        }catch(e){}
+      };
+
+      m.querySelector("#rmenu-cam-photo").onclick = ()=>{
+        m.remove();
+        openCameraDirectly(
+          blob => applyPhoto(blob),
+          () => {
+            const inp = document.createElement("input");
+            inp.type = "file";
+            inp.accept = "image/*";
+            inp.capture = "environment";
+            inp.onchange = async e => {
+              if(e.target.files[0]){
+                const b = await procesarImagen(e.target.files[0]);
+                applyPhoto(b);
+              }
+            };
+            inp.click();
+          }
+        );
+      };
+
+      const fInp = m.querySelector("#rmenu-file-input");
+      m.querySelector("#rmenu-file-photo").onclick = ()=>fInp.click();
+      fInp.onchange = async e=>{
+        if(e.target.files[0]){
+          m.remove();
+          const b = await procesarImagen(e.target.files[0]);
+          applyPhoto(b);
+        }
+      };
+
+      if(foto && m.querySelector("#rmenu-view-photo")){
+        m.querySelector("#rmenu-view-photo").onclick = ()=>{
+          m.remove();
+          showImageModal(foto, `${prod.nombre} (${prod.codigo||"—"})`);
+        };
+      }
+
+      m.querySelector("#rmenu-delete-compra").onclick = ()=>{
+        m.remove();
+        showAdminConfirm("¿Quitar este registro de compras recientes?", "Se eliminará esta entrada de compra de la lista.", async ()=>{
+          await deleteRecentCompra(compra.id);
+          toast("Registro eliminado de compras recientes");
+          if(onDeleted) onDeleted();
+        });
+      };
+
+      m.querySelector("#rmenu-delete-prod").onclick = ()=>{
+        m.remove();
+        showAdminConfirm(`ADMIN: ¿Confirma eliminar ${prod.codigo || prod.nombre}?`, "El producto y todas sus compras se borrarán por completo.", async ()=>{
+          await deleteProductRecord(prod.id);
+          toast("Producto eliminado permanentemente");
+          if(onDeleted) onDeleted();
+          render();
+        });
+      };
+    }
+
+    function showImageModal(imgUrl, title="Detalle del producto"){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[160] bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-4",onclick:e=>{if(e.target===m)m.remove();}});
+      m.innerHTML = `
+        <div class="relative max-w-sm w-full bg-slate-900 rounded-2xl overflow-hidden shadow-2xl flex flex-col items-center">
+          <div class="w-full flex justify-between items-center p-3 text-white border-b border-slate-800">
+            <span class="text-xs font-semibold truncate pr-2">${escapeHtml(title)}</span>
+            <button id="close-img-modal" class="text-slate-400 hover:text-white text-lg font-bold px-2 py-0.5">✕</button>
+          </div>
+          <div class="p-2 w-full flex items-center justify-center bg-black/40">
+            <img src="${imgUrl}" class="max-h-[70vh] max-w-full rounded-xl object-contain shadow-lg" alt="Foto">
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+      m.querySelector("#close-img-modal").onclick = ()=>m.remove();
+    }
+
+    function showProductMenu(prod, onPhotoUpdated, onDeleted){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[150] bg-slate-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-4",onclick:e=>{if(e.target===m)m.remove();}});
+      m.innerHTML = `
+        <div class="bg-white rounded-2xl p-4 w-full max-w-sm shadow-2xl space-y-2 animate-in fade-in slide-in-from-bottom-4">
+          <div class="flex items-center gap-2.5 pb-2 border-b">
+            ${prod.foto_url?`<img src="${prod.foto_url}" class="w-10 h-10 rounded-lg object-cover">`:`<div class="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center text-base">📦</div>`}
+            <div class="flex-1 min-w-0">
+              <p class="font-bold text-sm text-slate-800 truncate">${escapeHtml(prod.nombre)}</p>
+              <p class="text-xs text-slate-500">${escapeHtml(prod.codigo||"—")} · ${prod.precio_base ? fmtMoney(prod.precio_base) : "Sin precio"}</p>
+            </div>
+            <button id="close-menu" class="text-slate-400 text-lg px-2">✕</button>
+          </div>
+          <div class="space-y-1.5 pt-1">
+            <button id="menu-edit-price" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-brand-700 flex items-center gap-2.5">
+              <span>💲</span><span>Editar o agregar precio</span>
+            </button>
+            <button id="menu-cam-photo" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-slate-700 flex items-center gap-2.5">
+              <span>📸</span><span>${prod.foto_url ? "Tomar foto con cámara" : "Añadir foto con cámara"}</span>
+            </button>
+            <button id="menu-file-photo" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-slate-700 flex items-center gap-2.5">
+              <span>📁</span><span>Elegir de galería / archivo</span>
+            </button>
+            ${prod.foto_url ? `
+            <button id="menu-view-photo" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 text-xs font-bold text-slate-700 flex items-center gap-2.5">
+              <span>🔍</span><span>Ver foto en grande</span>
+            </button>` : ""}
+            <button id="menu-delete-prod" class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-red-50 text-xs font-bold text-red-600 flex items-center gap-2.5">
+              <span>🗑️</span><span>Eliminar producto del catálogo</span>
+            </button>
+          </div>
+          <input id="menu-file-input" type="file" accept="image/*" class="hidden" />
+        </div>
+      `;
+      document.body.appendChild(m);
+      m.querySelector("#close-menu").onclick = ()=>m.remove();
+
+      m.querySelector("#menu-edit-price").onclick = ()=>{
+        m.remove();
+        showPriceAssignModal(prod, async newVal=>{
+          prod.precio_base = newVal;
+          prod.synced = false;
+          await db.productos.put(prod);
+          await syncAllToServer();
+          toast("Precio actualizado");
+          render();
+        });
+      };
+
+      if(prod.foto_url && m.querySelector("#menu-view-photo")){
+        m.querySelector("#menu-view-photo").onclick = ()=>{
+          m.remove();
+          showImageModal(prod.foto_url, `${prod.nombre} (${prod.codigo})`);
+        };
+      }
+
+      const applyNewPhoto = async blob => {
+        if(!blob) return;
+        const localUrl = URL.createObjectURL(blob);
+        prod.foto_url = localUrl;
+        prod.synced = false;
+        await db.productos.put(prod);
+        await syncAllToServer();
+        if(onPhotoUpdated) onPhotoUpdated(localUrl);
+        render();
+        toast("Foto guardada");
+        try {
+          const remoteUrl = await subirImagen(blob);
+          if(remoteUrl){
+            prod.foto_url = remoteUrl;
+            await db.productos.put(prod);
+            await syncAllToServer();
+          }
+        }catch(e){}
+      };
+
+      // Abre la cámara DIRECTAMENTE sin confirmación previa
+      m.querySelector("#menu-cam-photo").onclick = ()=>{
+        m.remove();
+        openCameraDirectly(
+          blob => applyNewPhoto(blob),
+          () => {
+            const tempInp = document.createElement("input");
+            tempInp.type = "file";
+            tempInp.accept = "image/*";
+            tempInp.capture = "environment";
+            tempInp.onchange = async e=>{
+              if(e.target.files[0]){
+                const b = await procesarImagen(e.target.files[0]);
+                applyNewPhoto(b);
+              }
+            };
+            tempInp.click();
+          }
+        );
+      };
+
+      // Abre selector de archivo directamente
+      const fileInp = m.querySelector("#menu-file-input");
+      m.querySelector("#menu-file-photo").onclick = ()=>fileInp.click();
+      fileInp.onchange = async e=>{
+        if(e.target.files[0]){
+          m.remove();
+          const b = await procesarImagen(e.target.files[0]);
+          applyNewPhoto(b);
+        }
+      };
+
+      m.querySelector("#menu-delete-prod").onclick = ()=>{
+        m.remove();
+        showAdminConfirm(`ADMIN: ¿Confirma eliminar ${prod.codigo || prod.nombre}?`, "El producto y sus registros se borrarán del catálogo.", async ()=>{
+          await deleteProductRecord(prod.id);
+          toast("Producto eliminado");
+          if(onDeleted) onDeleted();
+          render();
+        });
+      };
+    }
+
+    function promptPhotoCapture(onBlobSelected){
+      // Apertura DIRECTA de la cámara sin menú intermedio
+      openCameraDirectly(
+        blob => { if(onBlobSelected) onBlobSelected(blob); },
+        () => {
+          const tempInp = document.createElement("input");
+          tempInp.type = "file";
+          tempInp.accept = "image/*";
+          tempInp.capture = "environment";
+          tempInp.onchange = async e => {
+            if(e.target.files[0]){
+              const b = await procesarImagen(e.target.files[0]);
+              if(onBlobSelected) onBlobSelected(b);
+            }
+          };
+          tempInp.click();
+        }
+      );
     }
 
     // ===================== PARSER ROBUSTO =====================
@@ -137,135 +1058,206 @@
       return {ok:total>0||paquetes>0,paquetes,ppp,sueltas,total};
     }
 
-    // Parser de distribución MUCHO más robusto
-    function parseDistribucion(text, totalPiezas=0){
+    // Parser de distribución con PRIORIDAD a repartición de paquetes completos
+    function parseDistribucion(text, totalPiezas=0, totalPaquetes=0, ppp=0, sueltas=0){
       const norm=normText(text);
       const res={M:{paquetes:0,piezas:0},C:{paquetes:0,piezas:0},R:{paquetes:0,piezas:0}};
-      let assigned=0;
       let found=false;
 
-      // Todo a X
+      // Helper para convertir una cantidad objetivo de piezas en paquetes + piezas
+      const splitPzsToPaq = (targetPzs) => {
+        if(ppp > 0){
+          return {
+            paquetes: Math.floor(targetPzs / ppp),
+            piezas: targetPzs % ppp
+          };
+        }
+        return { paquetes: 0, piezas: targetPzs };
+      };
+
+      // 1. Todo a X
       let m=norm.match(/(?:todo|todas)\s+(?:para|a)\s+(\w+)/);
       if(m){
         const u=ALIAS[m[1]]||m[1].toUpperCase();
         if(UBICACIONES.includes(u)){
-          res[u].piezas=totalPiezas;
+          if(totalPaquetes > 0 && ppp > 0){
+            res[u].paquetes = totalPaquetes;
+            res[u].piezas = sueltas;
+          } else {
+            res[u].paquetes = 0;
+            res[u].piezas = totalPiezas;
+          }
           return {ok:true,distribucion:res,msg:`Todo a ${u}`};
         }
       }
 
-      // Partes iguales / uno para cada quien
-      if(/partes?\s*iguales?|uno\s+para\s+cada|igual\s+a\s+cada/.test(norm)){
-        const n=UBICACIONES.length;
-        const base=Math.floor(totalPiezas/n);
-        let extra=totalPiezas%n;
-        UBICACIONES.forEach((u,i)=>{
-          res[u].piezas=base+(extra>0?1:0);
-          if(extra>0) extra--;
-        });
-        return {ok:true,distribucion:res,msg:"Partes iguales"};
+      // 2. Partes iguales / uno para cada quien (PRIORIZA PAQUETES COMPLETOS)
+      if(/partes?\s*iguales?|uno\s+para\s+cada|igual\s+a\s+cada|a\s+todos\s+por\s+igual|parejo/.test(norm)){
+        const n=UBICACIONES.length; // 3 tiendas
+        if(totalPaquetes > 0 && ppp > 0){
+          // Repartir paquetes completos primero
+          const basePaq = Math.floor(totalPaquetes / n);
+          const paqRestantes = totalPaquetes % n;
+          // Piezas sobrantes: las que quedan del paquete no dividido parejo + las sueltas
+          const pzSobrantes = (paqRestantes * ppp) + sueltas;
+          const basePzs = Math.floor(pzSobrantes / n);
+          let extraPz = pzSobrantes % n;
+
+          UBICACIONES.forEach(u=>{
+            res[u].paquetes = basePaq;
+            res[u].piezas = basePzs + (extraPz > 0 ? 1 : 0);
+            if(extraPz > 0) extraPz--;
+          });
+          return {ok:true,distribucion:res,msg:"Partes iguales (priorizando paquetes completos)"};
+        } else {
+          const base=Math.floor(totalPiezas/n);
+          let extra=totalPiezas%n;
+          UBICACIONES.forEach(u=>{
+            res[u].paquetes = 0;
+            res[u].piezas = base + (extra>0?1:0);
+            if(extra>0) extra--;
+          });
+          return {ok:true,distribucion:res,msg:"Partes iguales en piezas"};
+        }
       }
 
-      // Mitad y mitad
+      // 3. Mitad y mitad (PRIORIZA PAQUETES COMPLETOS)
       if(/mitad/.test(norm)){
         const locs=[];
         for(const [a,u] of Object.entries(ALIAS)){
           if(norm.includes(a) && !locs.includes(u)) locs.push(u);
         }
+        if(locs.length < 2){
+          if(!locs.includes("M")) locs.push("M");
+          if(!locs.includes("C") && locs.length < 2) locs.push("C");
+        }
         if(locs.length>=2){
-          const half=Math.floor(totalPiezas/2);
-          res[locs[0]].piezas=half;
-          res[locs[1]].piezas=totalPiezas-half;
-          return {ok:true,distribucion:res,msg:"Mitad y mitad"};
+          const l1 = locs[0], l2 = locs[1];
+          if(totalPaquetes > 0 && ppp > 0){
+            const basePaq = Math.floor(totalPaquetes / 2);
+            const paqRest = totalPaquetes % 2;
+            const pzSobrantes = (paqRest * ppp) + sueltas;
+            const halfPzs = Math.floor(pzSobrantes / 2);
+            const remPz = pzSobrantes % 2;
+            res[l1].paquetes = basePaq;
+            res[l1].piezas = halfPzs + remPz;
+            res[l2].paquetes = basePaq;
+            res[l2].piezas = halfPzs;
+          } else {
+            const half=Math.floor(totalPiezas/2);
+            res[l1].piezas=totalPiezas-half;
+            res[l2].piezas=half;
+          }
+          return {ok:true,distribucion:res,msg:`Mitad a ${l1} y mitad a ${l2}`};
         }
       }
 
-      // Extraer asignaciones explícitas: "8 Isla", "Isla 8", "10 para M", "5 y 5 Rodriguez y Chilte"
-      const tokens=norm.split(/[\s,;]+/).filter(Boolean);
-      const explicit={M:0,C:0,R:0};
-
-      // Patrón: número + (para|a)? + ubicacion
-      const re1=/(\d+)\s*(?:para|a|en)?\s*(\w+)/g;
-      let match;
-      while((match=re1.exec(norm))!==null){
-        const num=+match[1];
-        const u=ALIAS[match[2]]||match[2].toUpperCase();
-        if(UBICACIONES.includes(u)){
-          explicit[u]+=num;
-          found=true;
-        }
-      }
-      // Patrón inverso: ubicacion + número
-      const re2=/(\w+)\s+(\d+)/g;
-      while((match=re2.exec(norm))!==null){
-        const u=ALIAS[match[1]]||match[1].toUpperCase();
-        const num=+match[2];
-        if(UBICACIONES.includes(u) && !isNaN(num)){
-          if(explicit[u]===0){ explicit[u]=num; found=true; }
-        }
-      }
-
-      // "10 y 10 Isla y R"
-      const yMatch=norm.match(/(\d+)\s*y\s*(\d+)\s+(\w+)\s*y\s*(\w+)/);
-      if(yMatch){
-        const u1=ALIAS[yMatch[3]]||yMatch[3].toUpperCase();
-        const u2=ALIAS[yMatch[4]]||yMatch[4].toUpperCase();
-        if(UBICACIONES.includes(u1)) explicit[u1]=+yMatch[1];
-        if(UBICACIONES.includes(u2)) explicit[u2]=+yMatch[2];
-        found=true;
-      }
-
-      assigned=explicit.M+explicit.C+explicit.R;
-
-      // Resto / las demás
-      if(/resto|demás|restante|sobrante/.test(norm)){
-        const resto=Math.max(0,totalPiezas-assigned);
-        const restoLocs=[];
-        // Detectar a quién va el resto
-        if(/resto\s+(?:a|para)\s+(\w+)\s*y\s*(\w+)/.test(norm)){
-          const u1=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
-          const u2=ALIAS[RegExp.$2]||RegExp.$2.toUpperCase();
-          if(UBICACIONES.includes(u1)) restoLocs.push(u1);
-          if(UBICACIONES.includes(u2)) restoLocs.push(u2);
-        } else if(/resto\s+(?:a|para)\s+(\w+)/.test(norm)){
-          const u=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
-          if(UBICACIONES.includes(u)) restoLocs.push(u);
-        } else if(/las?\s+dem[aá]s\s+(?:a|para)\s+(\w+)/.test(norm)){
-          const u=ALIAS[RegExp.$1]||RegExp.$1.toUpperCase();
-          if(UBICACIONES.includes(u)) restoLocs.push(u);
-        } else {
-          // resto a los que no tienen asignación
-          UBICACIONES.forEach(u=>{ if(explicit[u]===0) restoLocs.push(u); });
-        }
-        if(restoLocs.length&&resto>0){
-          const base=Math.floor(resto/restoLocs.length);
-          let extra=resto%restoLocs.length;
-          restoLocs.forEach(u=>{
-            explicit[u]+=base+(extra>0?1:0);
-            if(extra>0) extra--;
+      // 4. "dos para cada quien y una más a R" / "X para cada quien y Y más a Z"
+      const cadaQuienM = norm.match(/(\d+|\w+)\s+(?:para|a)?\s*(?:cada\s*(?:quien|uno|tienda)|todos)/);
+      if(cadaQuienM){
+        const cantBase = wordsToNumber(cadaQuienM[1]) || 0;
+        if(cantBase > 0){
+          const asumePaquetes = totalPaquetes > 0 && (cantBase * UBICACIONES.length <= totalPaquetes);
+          UBICACIONES.forEach(u=>{
+            if(asumePaquetes){
+              res[u].paquetes = cantBase;
+            } else {
+              const sp = splitPzsToPaq(cantBase);
+              res[u].paquetes = sp.paquetes;
+              res[u].piezas = sp.piezas;
+            }
           });
-          found=true;
+          const extraM = norm.match(/(\d+|\w+)\s*(?:m[aá]s)?\s*(?:a|para)\s*(\w+)/);
+          if(extraM){
+            const extNum = wordsToNumber(extraM[1]) || 0;
+            const extU = ALIAS[extraM[2]] || extraM[2].toUpperCase();
+            if(UBICACIONES.includes(extU)){
+              if(asumePaquetes){
+                res[extU].paquetes += extNum;
+              } else {
+                res[extU].piezas += extNum;
+              }
+            }
+          }
+          return {ok:true,distribucion:res,msg:`${cantBase} para cada quien`};
         }
       }
 
-      // Si solo se mencionaron algunas y no hay "resto", el resto queda en 0
-      UBICACIONES.forEach(u=>{
-        res[u].piezas=explicit[u]||0;
-      });
+      // 5. Asignaciones explícitas con paquetes o piezas
+      const explicit={M:{paquetes:0,piezas:0},C:{paquetes:0,piezas:0},R:{paquetes:0,piezas:0}};
+      
+      const rePaq = /(\d+|\w+)\s*(?:paquetes?|pq|pqs)\s*(?:para|a|en)?\s*(\w+)/g;
+      let mp;
+      while((mp = rePaq.exec(norm)) !== null){
+        const n = wordsToNumber(mp[1]) || 0;
+        const u = ALIAS[mp[2]] || mp[2].toUpperCase();
+        if(UBICACIONES.includes(u)){
+          explicit[u].paquetes += n;
+          found = true;
+        }
+      }
 
-      if(!found && totalPiezas>0){
-        // Último recurso: buscar cualquier número junto a alias
-        for(const [a,u] of Object.entries(ALIAS)){
-          const re=new RegExp(`(\\d+)\\s*${a}|${a}\\s*(\\d+)`);
-          const mm=norm.match(re);
-          if(mm){
-            res[u].piezas=+(mm[1]||mm[2]);
-            found=true;
+      const rePz = /(\d+|\w+)\s*(?:piezas?|pzs?)\s*(?:para|a|en)?\s*(\w+)/g;
+      while((mp = rePz.exec(norm)) !== null){
+        const n = wordsToNumber(mp[1]) || 0;
+        const u = ALIAS[mp[2]] || mp[2].toUpperCase();
+        if(UBICACIONES.includes(u)){
+          explicit[u].piezas += n;
+          found = true;
+        }
+      }
+
+      if(!found){
+        const reSimple = /(\d+)\s*(?:para|a|en)?\s*(\w+)/g;
+        while((mp = reSimple.exec(norm)) !== null){
+          const num = +mp[1];
+          const u = ALIAS[mp[2]] || mp[2].toUpperCase();
+          if(UBICACIONES.includes(u)){
+            if(totalPaquetes > 0 && num <= totalPaquetes && ppp > 0){
+              explicit[u].paquetes += num;
+            } else {
+              const sp = splitPzsToPaq(num);
+              explicit[u].paquetes += sp.paquetes;
+              explicit[u].piezas += sp.piezas;
+            }
+            found = true;
           }
         }
       }
 
-      return found?{ok:true,distribucion:res}:{ok:false};
+      if(found){
+        UBICACIONES.forEach(u=>{
+          res[u].paquetes = explicit[u].paquetes;
+          res[u].piezas = explicit[u].piezas;
+        });
+
+        if(/resto|dem[aá]s|restante|sobrante/.test(norm)){
+          const assignedPzs = UBICACIONES.reduce((s,u)=> s + res[u].paquetes*(ppp||0) + res[u].piezas, 0);
+          const restoPzs = Math.max(0, totalPiezas - assignedPzs);
+          if(restoPzs > 0){
+            let restoLoc = null;
+            let rm = norm.match(/(?:resto|dem[aá]s|restante|sobrante)\s*(?:a|para|en)?\s*(\w+)/);
+            if(rm){
+              const u = ALIAS[rm[1]] || rm[1].toUpperCase();
+              if(UBICACIONES.includes(u)) restoLoc = u;
+            }
+            if(!restoLoc){
+              restoLoc = UBICACIONES.find(u => res[u].paquetes === 0 && res[u].piezas === 0) || "R";
+            }
+            if(restoLoc){
+              if(ppp > 0){
+                res[restoLoc].paquetes += Math.floor(restoPzs / ppp);
+                res[restoLoc].piezas += restoPzs % ppp;
+              } else {
+                res[restoLoc].piezas += restoPzs;
+              }
+            }
+          }
+        }
+        return {ok:true, distribucion:res, msg:"Distribución asignada"};
+      }
+
+      return {ok:false};
     }
 
     async function procesarImagen(file){
@@ -274,12 +1266,21 @@
         reader.onload=e=>{
           const img=new Image();
           img.onload=()=>{
+            // Recorte y escala a 120x120 centrado de excelente calidad y peso ultraliviano (~8-15KB)
+            const targetSize = 120;
+            let w = img.width, h = img.height;
+            let sSize = Math.min(w, h);
+            let sx = Math.floor((w - sSize) / 2);
+            let sy = Math.floor((h - sSize) / 2);
+
             const c=document.createElement("canvas");
-            c.width=96;c.height=96;
+            c.width=targetSize;
+            c.height=targetSize;
             const ctx=c.getContext("2d");
-            const r=Math.max(96/img.width,96/img.height);
-            ctx.drawImage(img,(96-img.width*r)/2,(96-img.height*r)/2,img.width*r,img.height*r);
-            c.toBlob(b=>resolve(b),"image/webp",0.7);
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
+            ctx.drawImage(img, sx, sy, sSize, sSize, 0, 0, targetSize, targetSize);
+            c.toBlob(b=>resolve(b),"image/jpeg",0.80);
           };
           img.src=e.target.result;
         };
@@ -338,169 +1339,642 @@
       app.appendChild(renderNav());
     }
 
+    function showBackupModal(){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[150] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4",onclick:e=>{if(e.target===m)m.remove();}});
+      m.innerHTML = `
+        <div class="bg-white rounded-3xl p-5 w-full max-w-sm shadow-2xl space-y-3.5 animate-in fade-in">
+          <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+            <div class="flex items-center gap-2">
+              <span class="text-xl">🔁</span>
+              <h3 class="font-black text-sm text-slate-900">Sincronización y Respaldo</h3>
+            </div>
+            <button id="close-bkp" class="text-slate-400 hover:text-slate-700 text-lg px-2">✕</button>
+          </div>
+
+          <p class="text-xs text-slate-600 leading-relaxed">
+            Pasa tus productos registrados entre <b>GitHub</b> y <b>AI Studio</b> fácilmente:
+          </p>
+
+          <div class="space-y-2 pt-1">
+            <button id="btn-copy-backup" class="w-full py-2.5 px-3 bg-brand-600 hover:bg-brand-700 active:scale-95 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-xs transition-all">
+              <span>📋</span><span>Copiar Todo al Portapapeles</span>
+            </button>
+
+            <button id="btn-paste-backup-trig" class="w-full py-2.5 px-3 bg-brand-50 hover:bg-brand-100 active:scale-95 text-brand-800 border border-brand-200 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all">
+              <span>📥</span><span>Pegar Respaldo desde Portapapeles</span>
+            </button>
+
+            <div class="flex gap-2 pt-1">
+              <button id="btn-export-backup" class="flex-1 py-2 px-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1 transition-all">
+                <span>📤</span><span>Bajar .JSON</span>
+              </button>
+              <button id="btn-import-backup-trig" class="flex-1 py-2 px-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1 transition-all">
+                <span>📁</span><span>Subir .JSON</span>
+              </button>
+            </div>
+            <input id="file-backup-inp" type="file" accept=".json,application/json" class="hidden" />
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+      m.querySelector("#close-bkp").onclick = ()=>m.remove();
+
+      const getBackupPayload = async ()=>{
+        return {
+          version: 1,
+          origen: window.location.origin,
+          fecha: new Date().toISOString(),
+          productos: await db.productos.toArray(),
+          compras: await db.compras.toArray(),
+          envios: await db.envios.toArray(),
+          recepciones: await db.recepciones.toArray(),
+          usuarios: await db.usuarios.toArray()
+        };
+      };
+
+      m.querySelector("#btn-copy-backup").onclick = async ()=>{
+        try {
+          const payload = await getBackupPayload();
+          const str = JSON.stringify(payload);
+          await navigator.clipboard.writeText(str);
+          toast("¡Copiado! Ahora puedes pegarlo en AI Studio o GitHub");
+        } catch(e){
+          toast("No se pudo copiar automáticamente: "+e.message, "err");
+        }
+      };
+
+      m.querySelector("#btn-export-backup").onclick = async ()=>{
+        const data = await getBackupPayload();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `bodega_mm_respaldo_${new Date().toISOString().slice(0,10)}.json`;
+        a.click();
+        toast("Respaldo descargado");
+      };
+
+      const fileInp = m.querySelector("#file-backup-inp");
+      m.querySelector("#btn-import-backup-trig").onclick = ()=>fileInp.click();
+
+      fileInp.onchange = async e=>{
+        const file = e.target.files[0];
+        if(!file) return;
+        try {
+          const text = await file.text();
+          const json = JSON.parse(text);
+          await restaurarRespaldo(json);
+          m.remove();
+        } catch(err){
+          toast("Error al leer archivo JSON: "+err.message, "err");
+        }
+      };
+
+      m.querySelector("#btn-paste-backup-trig").onclick = ()=>{
+        m.remove();
+        showPasteModal();
+      };
+    }
+
+    async function restaurarRespaldo(json){
+      if(!json || typeof json !== "object"){
+        toast("Formato de respaldo no válido","err");
+        return;
+      }
+      let prodsCount = 0;
+      if(Array.isArray(json.productos)){
+        for(const p of json.productos){
+          await db.productos.put(p);
+          prodsCount++;
+        }
+      }
+      if(Array.isArray(json.compras)){
+        for(const c of json.compras){ await db.compras.put(c); }
+      }
+      if(Array.isArray(json.envios)){
+        for(const ev of json.envios){ await db.envios.put(ev); }
+      }
+      if(Array.isArray(json.recepciones)){
+        for(const r of json.recepciones){ await db.recepciones.put(r); }
+      }
+      if(Array.isArray(json.usuarios)){
+        for(const u of json.usuarios){ await db.usuarios.put(u); }
+      }
+      // Sincronizar con el servidor de inmediato
+      await syncAllToServer();
+      toast(`¡Éxito! Se importaron ${prodsCount} producto(s)`);
+      render();
+    }
+
+    function showPasteModal(){
+      const prev = $("#custom-modal");
+      if(prev) prev.remove();
+      const m = el("div",{id:"custom-modal",class:"fixed inset-0 z-[150] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4",onclick:e=>{if(e.target===m)m.remove();}});
+      m.innerHTML = `
+        <div class="bg-white rounded-3xl p-5 w-full max-w-sm shadow-2xl space-y-3 animate-in fade-in">
+          <div class="flex justify-between items-center pb-1">
+            <h3 class="font-black text-sm text-slate-900">Pegar Respaldo JSON</h3>
+            <button id="close-paste" class="text-slate-400 text-lg px-2">✕</button>
+          </div>
+          <p class="text-xs text-slate-500">Pega aquí el contenido JSON exportado de GitHub:</p>
+          <textarea id="paste-area" rows="6" class="w-full p-2.5 rounded-xl border border-slate-300 font-mono text-[11px] outline-none focus:border-brand-600" placeholder='{"productos": [...]}'></textarea>
+          <div class="flex gap-2 pt-1">
+            <button id="cancel-paste" class="flex-1 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold">Cancelar</button>
+            <button id="ok-paste" class="flex-1 py-2 rounded-xl bg-brand-600 text-white text-xs font-bold">Importar</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+      m.querySelector("#close-paste").onclick = ()=>m.remove();
+      m.querySelector("#cancel-paste").onclick = ()=>m.remove();
+      m.querySelector("#ok-paste").onclick = async ()=>{
+        const txt = m.querySelector("#paste-area").value.trim();
+        if(!txt) return;
+        try {
+          const json = JSON.parse(txt);
+          m.remove();
+          await restaurarRespaldo(json);
+        } catch(e){
+          toast("El texto no es un JSON válido","err");
+        }
+      };
+    }
+
     function renderHeader(){
-      const h=el("header",{class:"bg-brand-900 text-white sticky top-0 z-40"});
+      const h=el("header",{class:"bg-brand-900 text-white sticky top-0 z-40 shadow-md"});
       const inner=el("div",{class:"max-w-md mx-auto px-3 py-2 flex justify-between items-center"});
-      inner.appendChild(el("div",{class:"flex items-center gap-2"},
-        el("span",{class:"font-bold"},"MM"),
-        el("span",{class:"text-[10px] bg-brand-500 px-2 py-0.5 rounded-full"},state.user.id)
-      ));
-      const right=el("div",{class:"flex gap-1.5"});
-      right.appendChild(el("button",{class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg",onclick:()=>toast("Sincronizado")},"↻"));
-      right.appendChild(el("button",{class:"text-xs bg-white/20 px-2.5 py-1 rounded-lg",onclick:()=>{state.user=null;state.view="login";render();}},"Salir"));
+      
+      const left=el("div",{class:"flex items-center gap-2"},
+        el("span",{class:"font-extrabold tracking-tight text-base text-white"},"MM"),
+        el("span",{class:"text-[11px] bg-brand-600 font-bold px-2 py-0.5 rounded-full border border-brand-400/30"},state.user.id),
+        el("div",{
+          class:`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium ${state.online ? "bg-emerald-950/70 text-emerald-300 border border-emerald-500/40" : "bg-red-950/70 text-red-300 border border-red-500/40"}`
+        },
+          el("span",{class:`w-2 h-2 rounded-full ${state.online ? "bg-emerald-400 animate-pulse" : "bg-red-500"}`}),
+          el("span",{},state.online ? "Conectado" : "Sin conexión")
+        )
+      );
+      inner.appendChild(left);
+
+      const right=el("div",{class:"flex items-center gap-1.5"});
+
+      // Botón Respaldo (para pasar datos entre GitHub y AI Studio en 1 clic)
+      const bkpBtn=el("button",{
+        class:"text-xs bg-white/15 hover:bg-white/25 active:scale-95 px-2 py-1.5 rounded-lg flex items-center gap-1 font-semibold transition-all",
+        title:"Respaldo / Transferir datos de GitHub",
+        onclick:()=>showBackupModal()
+      },
+        el("span",{class:"text-xs"},"🔁"),
+        el("span",{class:"text-[11px]"},"Respaldo")
+      );
+      right.appendChild(bkpBtn);
+
+      const syncBtn=el("button",{
+        class:"text-xs bg-white/15 hover:bg-white/25 active:scale-95 px-2.5 py-1.5 rounded-lg flex items-center gap-1 font-semibold transition-all",
+        title:"Sincronizar ahora",
+        onclick:async ()=>{
+          syncBtn.classList.add("opacity-60");
+          const icon = syncBtn.querySelector(".sync-icon");
+          if(icon) icon.classList.add("animate-spin");
+          try {
+            await syncAllToServer();
+            await syncAllFromServer();
+            render();
+            toast("Sincronización completada con el servidor","ok");
+          } catch(err){
+            toast("Sincronizado localmente","ok");
+          } finally {
+            syncBtn.classList.remove("opacity-60");
+            if(icon) icon.classList.remove("animate-spin");
+          }
+        }
+      },
+        el("span",{class:"sync-icon inline-block text-xs font-bold"},"↻")
+      );
+      right.appendChild(syncBtn);
+
+      right.appendChild(el("button",{
+        class:"text-xs bg-red-600/70 hover:bg-red-600 px-2 py-1.5 rounded-lg font-bold transition-all",
+        onclick:()=>{
+          showAdminConfirm("¿Cerrar sesión?", "Regresarás a la pantalla de acceso.", ()=>{
+            state.user=null;
+            localStorage.removeItem("bodega_user");
+            state.view="login";
+            render();
+          });
+        }
+      },"Salir"));
+
       inner.appendChild(right);
       h.appendChild(inner);
       return h;
     }
 
     function renderNav(){
-      const nav=el("nav",{class:"fixed bottom-0 inset-x-0 bg-white border-t z-40"});
+      const nav=el("nav",{class:"fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-40 shadow-lg"});
       const wrap=el("div",{class:"max-w-md mx-auto grid "+(state.user.rol==="admin"?"grid-cols-4":"grid-cols-2")});
       const tabs=state.user.rol==="admin"
         ? [["registro","Registro","📦"],["consultar","Precios","🔍"],["reportes","Reportes","📊"],["config","Config","⚙️"]]
         : [["consultar","Precios","🔍"],["recibir","Recibir","📥"]];
       tabs.forEach(([v,l,i])=>{
         const active=state.view===v;
-        wrap.appendChild(el("button",{class:`flex flex-col items-center py-2 ${active?"text-brand-600":"text-slate-400"}`,onclick:()=>{state.view=v;render();}},
-          el("span",{class:"text-lg"},i),el("span",{class:"text-[10px]"},l)));
+        wrap.appendChild(el("button",{
+          class:`flex flex-col items-center py-2 transition-all ${active?"text-brand-600 font-bold":"text-slate-400 hover:text-slate-600"}`,
+          onclick:()=>{state.view=v;render();}
+        },
+          el("span",{class:"text-lg leading-tight"},i),
+          el("span",{class:"text-[10px] mt-0.5"},l)
+        ));
       });
       nav.appendChild(wrap);
       return nav;
     }
 
     function renderLogin(){
-      const w=el("div",{class:"min-h-screen flex items-center justify-center bg-gradient-to-b from-brand-900 to-brand-700 px-6"});
-      const card=el("div",{class:"bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl"});
+      const w=el("div",{class:"min-h-screen flex items-center justify-center bg-gradient-to-b from-brand-900 via-brand-800 to-slate-900 px-5 py-6"});
+      const card=el("div",{class:"bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl space-y-4"});
       card.innerHTML=`
-        <div class="text-center mb-5"><div class="text-4xl mb-1">📦</div><h1 class="text-xl font-extrabold">Distribución MM</h1></div>
-        <input id="li-codigo" class="w-full mb-2 px-3 py-2.5 rounded-xl border uppercase outline-none text-sm" placeholder="Código" />
-        <input id="li-pin" type="password" maxlength="4" inputmode="numeric" class="w-full mb-3 px-3 py-2.5 rounded-xl border text-center outline-none" placeholder="PIN" />
-        <button id="li-btn" class="w-full bg-brand-600 text-white py-3 rounded-xl font-bold">Entrar</button>
-        <p class="text-[10px] text-center text-slate-400 mt-2">ADMIN/1234 · M1/1111</p>`;
+        <div class="text-center pt-1 pb-2">
+          <div class="w-14 h-14 mx-auto mb-2.5 rounded-2xl bg-brand-50 text-brand-600 flex items-center justify-center text-3xl shadow-inner">📦</div>
+          <h1 class="text-xl font-black text-slate-900 tracking-tight">Distribución MM</h1>
+          <p class="text-xs text-slate-500 mt-0.5">Control de Bodega y Sucursales</p>
+        </div>
+
+        <div class="space-y-3">
+          <div>
+            <label class="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">Usuario / Sucursal</label>
+            <div class="relative">
+              <span class="absolute left-3.5 top-3 text-slate-400 text-sm">👤</span>
+              <input id="li-codigo" class="w-full pl-9 pr-3.5 py-2.5 rounded-xl border border-slate-300 focus:border-brand-600 focus:ring-1 focus:ring-brand-600 uppercase font-bold text-slate-800 outline-none text-sm transition-all" placeholder="Ej. ADMIN" autocomplete="username" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">PIN de acceso</label>
+            <div class="relative">
+              <span class="absolute left-3.5 top-3 text-slate-400 text-sm">🔒</span>
+              <input id="li-pin" type="password" maxlength="4" inputmode="numeric" class="w-full pl-9 pr-3.5 py-2.5 rounded-xl border border-slate-300 focus:border-brand-600 focus:ring-1 focus:ring-brand-600 font-bold text-slate-800 outline-none text-sm tracking-widest transition-all" placeholder="••••" autocomplete="current-password" />
+            </div>
+          </div>
+
+          <button id="li-btn" class="w-full mt-2 bg-brand-600 hover:bg-brand-700 active:scale-[0.98] text-white py-3 rounded-xl font-extrabold text-sm shadow-md transition-all">
+            Ingresar al Sistema
+          </button>
+        </div>
+      `;
       w.appendChild(card);
       setTimeout(()=>{
-        $("#li-btn").onclick=async()=>{
-          const u=await login($("#li-codigo").value,$("#li-pin").value);
-          if(u){state.user=u;state.view=u.rol==="admin"?"registro":"consultar";render();toast("Bienvenido "+u.id);}
-          else toast("Credenciales incorrectas","err");
+        const codInp = $("#li-codigo");
+        const pinInp = $("#li-pin");
+        const doLogin = async ()=>{
+          const u=await login(codInp.value, pinInp.value);
+          if(u){
+            state.user=u;
+            try { localStorage.setItem("bodega_user", JSON.stringify(u)); } catch(e){}
+            state.view=u.rol==="admin"?"registro":"consultar";
+            render();
+            toast("Bienvenido "+u.id);
+          } else {
+            toast("Credenciales incorrectas","err");
+          }
         };
+        $("#li-btn").onclick = doLogin;
+        pinInp.onkeydown = e => { if(e.key==="Enter") doLogin(); };
+        codInp.onkeydown = e => { if(e.key==="Enter") pinInp.focus(); };
       },0);
       return w;
     }
 
     // ===================== REGISTRO =====================
     function renderRegistro(){
-      const wrap=el("div",{class:"space-y-2"});
-      const card=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2.5"});
+      const wrap=el("div",{class:"space-y-3 pb-8"});
+      const card=el("div",{class:"bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3.5"});
+
+      const d = state.draft;
+      const hasDraftData = Boolean(d.nombre || d.codigo || d.paquetes || d.sueltas || d.precio || d.fotoDataUrl);
 
       card.innerHTML=`
-        <div class="grid grid-cols-[4.5rem_1fr] gap-2">
-          <div id="foto-box" class="w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-[11px] font-semibold cursor-pointer select-none">
-            <span class="text-xl">📷</span><span>Capturar</span>
-          </div>
-          <div class="space-y-1.5">
-            <input id="p-nombre" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none" placeholder="Nombre del producto" />
-            <div class="flex gap-1.5">
-              <input id="p-codigo" class="flex-1 px-2.5 py-2 rounded-lg border text-sm outline-none uppercase" placeholder="Código" />
-              <button id="btn-dictar-nc" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg shrink-0">🎙</button>
-            </div>
-          </div>
-        </div>
-        <input id="foto-input" type="file" accept="image/*" class="hidden" />
+        ${hasDraftData ? `
+        <div class="flex justify-between items-center bg-brand-50/70 border border-brand-200/60 rounded-xl px-3 py-1.5 text-[11px] text-brand-800">
+          <span class="flex items-center gap-1 font-semibold"><span>📝</span><span>Borrador guardado automáticamente</span></span>
+          <button id="btn-clear-draft" class="text-red-600 font-bold hover:underline">Limpiar</button>
+        </div>` : ""}
 
-        <div>
-          <div class="text-[11px] font-semibold text-slate-600 mb-1">Cantidades</div>
-          <div class="grid grid-cols-3 gap-2 mb-1">
-            <div class="text-center">
-              <div class="text-[10px] text-slate-500 mb-0.5">Paquetes</div>
-              <input id="p-paquetes" type="number" value="0" class="w-full px-1 py-2 rounded-lg border text-center text-sm font-bold" />
+        <!-- Foto, Nombre y Código con botones claros para Celular y Laptop -->
+        <div class="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-xs space-y-2.5">
+          <div class="flex gap-3 items-stretch">
+            <!-- Box de la foto / Vista previa -->
+            <div id="foto-preview-box" class="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl bg-slate-100 border-2 border-slate-200 flex flex-col items-center justify-center overflow-hidden shrink-0 relative cursor-pointer hover:border-brand-500 transition-all select-none">
+              ${d.fotoDataUrl ? `
+                <img src="${d.fotoDataUrl}" class="w-full h-full object-cover">
+                <span class="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[8px] font-bold py-0.5 text-center">Toca p/ ver</span>
+              ` : `
+                <span class="text-2xl">📦</span>
+                <span class="text-[9px] text-slate-400 font-bold">Sin foto</span>
+              `}
             </div>
-            <div class="text-center">
-              <div class="text-[10px] text-slate-500 mb-0.5">Pz / Paq</div>
-              <input id="p-ppp" type="number" value="0" class="w-full px-1 py-2 rounded-lg border text-center text-sm font-bold" />
-            </div>
-            <div class="text-center">
-              <div class="text-[10px] text-slate-500 mb-0.5">Sueltas</div>
-              <input id="p-sueltas" type="number" value="0" class="w-full px-1 py-2 rounded-lg border text-center text-sm font-bold" />
+
+            <!-- Campos Nombre y Código -->
+            <div class="flex-1 min-w-0 space-y-2 flex flex-col justify-between">
+              <div>
+                <input id="p-nombre" value="${escapeHtml(d.nombre||"")}" class="w-full px-3 py-2 rounded-xl border border-slate-300 focus:border-brand-600 focus:ring-1 focus:ring-brand-600 font-semibold text-slate-800 text-sm outline-none transition-all" placeholder="Nombre del producto" />
+              </div>
+              <div class="flex gap-2">
+                <input id="p-codigo" value="${escapeHtml(d.codigo||"")}" class="flex-1 px-3 py-2 rounded-xl border border-slate-300 focus:border-brand-600 focus:ring-1 focus:ring-brand-600 font-bold text-slate-800 text-sm outline-none uppercase tracking-wide transition-all" placeholder="Código / Clave" />
+                <button id="btn-dictar-nc" type="button" title="Dictar nombre y código" class="w-10 h-10 rounded-xl bg-brand-600 hover:bg-brand-700 active:scale-95 text-white flex items-center justify-center text-lg shrink-0 shadow-sm transition-all">🎙</button>
+              </div>
             </div>
           </div>
+
+          <!-- BOTONES DE FOTO CLAROS, GRANDES Y VISIBLES EN CELULAR Y LAPTOP -->
+          <div class="grid grid-cols-2 gap-2 pt-1 border-t border-slate-100">
+            <!-- Botón 1: Cámara Directa -->
+            <button id="btn-cam-directo" type="button" class="py-2.5 px-2 rounded-xl bg-brand-600 hover:bg-brand-700 active:scale-95 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all">
+              <span class="text-base">📸</span>
+              <span>${d.fotoDataUrl ? "Retomar Cámara" : "Abrir Cámara"}</span>
+            </button>
+
+            <!-- Botón 2: Selector de Archivo / Galería (100% visible en Celular y Laptop) -->
+            <button id="btn-foto-archivo" type="button" class="py-2.5 px-2 rounded-xl border border-slate-300 hover:bg-slate-50 active:scale-95 text-slate-700 font-black text-xs flex items-center justify-center gap-1.5 transition-all">
+              <span class="text-base">📁</span>
+              <span>Galería / Archivo</span>
+            </button>
+          </div>
+
+          ${d.fotoDataUrl ? `
+            <div class="flex justify-between items-center px-1 text-[11px] text-slate-500 pt-0.5">
+              <span class="text-emerald-700 font-bold flex items-center gap-1"><span>✓</span><span>Foto cargada</span></span>
+              <div class="flex items-center gap-3 font-semibold">
+                <button id="btn-ver-foto" type="button" class="text-brand-600 hover:underline">🔍 Ver detalle</button>
+                <button id="btn-quitar-foto" type="button" class="text-red-500 hover:underline">🗑️ Quitar foto</button>
+              </div>
+            </div>
+          ` : ""}
+
+          <input id="input-cam-direct" type="file" accept="image/*" capture="environment" class="hidden" />
+          <input id="input-file-direct" type="file" accept="image/*" class="hidden" />
+        </div>
+
+        <!-- Banner de detección de código repetido / autocompletar -->
+        <div id="codigo-aviso" class="hidden"></div>
+
+        <!-- Cantidades con iconos e input de voz directamente alineado -->
+        <div class="bg-slate-50/80 rounded-2xl p-3 border border-slate-100 space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+              <span>📊</span><span>Cantidades</span>
+            </span>
+          </div>
+
           <div class="flex items-center gap-2">
-            <div id="p-total" class="flex-1 text-xs font-semibold bg-brand-50 text-brand-800 rounded-lg px-2.5 py-1.5">Total: 0 pz</div>
-            <button id="btn-dictar-cant" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg shrink-0">🎙</button>
+            <div class="flex-1 grid grid-cols-3 gap-2">
+              <div class="bg-white rounded-xl p-2 border border-slate-200/80 text-center shadow-xs">
+                <div class="text-[11px] font-bold text-slate-600 flex items-center justify-center gap-1 mb-1">
+                  <span>📦</span><span>Paquetes</span>
+                </div>
+                <input id="p-paquetes" type="number" inputmode="numeric" value="${d.paquetes||0}" class="w-full py-1.5 rounded-lg border border-slate-200 text-center text-base font-extrabold text-slate-800 outline-none focus:border-brand-500" />
+              </div>
+
+              <div class="bg-white rounded-xl p-2 border border-slate-200/80 text-center shadow-xs">
+                <div class="text-[11px] font-bold text-slate-600 flex items-center justify-center gap-1 mb-1">
+                  <span>🔢</span><span>Pz / Paq</span>
+                </div>
+                <input id="p-ppp" type="number" inputmode="numeric" value="${d.ppp||0}" class="w-full py-1.5 rounded-lg border border-slate-200 text-center text-base font-extrabold text-slate-800 outline-none focus:border-brand-500" />
+              </div>
+
+              <div class="bg-white rounded-xl p-2 border border-slate-200/80 text-center shadow-xs">
+                <div class="text-[11px] font-bold text-slate-600 flex items-center justify-center gap-1 mb-1">
+                  <span>🧩</span><span>Sueltas</span>
+                </div>
+                <input id="p-sueltas" type="number" inputmode="numeric" value="${d.sueltas||0}" class="w-full py-1.5 rounded-lg border border-slate-200 text-center text-base font-extrabold text-slate-800 outline-none focus:border-brand-500" />
+              </div>
+            </div>
+
+            <button id="btn-dictar-cant" title="Dictar cantidades" class="w-12 h-14 rounded-2xl bg-brand-600 hover:bg-brand-700 active:scale-95 text-white flex flex-col items-center justify-center text-lg shrink-0 shadow-sm transition-all">
+              <span>🎙</span>
+              <span class="text-[9px] font-bold">Voz</span>
+            </button>
+          </div>
+
+          <div class="flex items-center justify-between bg-brand-50 border border-brand-200/60 rounded-xl px-3 py-2">
+            <span class="text-xs font-bold text-brand-900 flex items-center gap-1.5">
+              <span>🏷️</span><span>Total calculado:</span>
+            </span>
+            <span id="p-total" class="text-sm font-black text-brand-700">0 pz</span>
           </div>
         </div>
 
-        <div>
-          <div class="text-[11px] font-semibold text-slate-600 mb-1">Distribución</div>
-          <div class="flex items-start gap-1.5">
-            <div class="flex-1 grid grid-cols-3 gap-1">
-              <div class="bg-brand-50 rounded-lg p-1 text-center">
-                <div class="font-bold text-brand-700 text-xs">M</div>
-                <div class="text-[9px] text-slate-400">PQ · PZ</div>
-                <div class="flex gap-0.5 justify-center mt-0.5">
-                  <input id="d-M-paq" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs font-semibold" />
-                  <input id="d-M-pzs" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs" />
+        <!-- Distribución con letras grandes e inputs medianos para touch fácil -->
+        <div class="bg-slate-50/80 rounded-2xl p-3 border border-slate-100 space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+              <span>🚚</span><span>Distribución a Sucursales</span>
+            </span>
+            <span id="d-validacion" class="text-[11px] font-bold text-amber-600">Falta distribuir</span>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <div class="flex-1 grid grid-cols-3 gap-2">
+              <!-- M (Misaki / Isla) -->
+              <div class="bg-white rounded-xl p-2 border-2 border-blue-200 text-center shadow-xs space-y-1.5">
+                <div class="flex items-center justify-center gap-1.5">
+                  <span class="w-7 h-7 rounded-lg bg-blue-600 text-white font-black text-base flex items-center justify-center shadow-xs">M</span>
+                  <span class="text-[10px] font-bold text-blue-900">Misaki</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1 text-[10px] font-bold text-slate-400">
+                  <span>PQ</span><span>PZ</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1">
+                  <input id="d-M-paq" type="number" inputmode="numeric" value="${d.dMpaq||0}" class="h-11 w-full rounded-lg border border-slate-300 text-center text-sm font-extrabold text-slate-800 outline-none focus:border-blue-600" />
+                  <input id="d-M-pzs" type="number" inputmode="numeric" value="${d.dMpzs||0}" class="h-11 w-full rounded-lg border border-slate-300 text-center text-sm font-extrabold text-slate-800 outline-none focus:border-blue-600" />
                 </div>
               </div>
-              <div class="bg-brand-50 rounded-lg p-1 text-center">
-                <div class="font-bold text-brand-700 text-xs">C</div>
-                <div class="text-[9px] text-slate-400">PQ · PZ</div>
-                <div class="flex gap-0.5 justify-center mt-0.5">
-                  <input id="d-C-paq" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs font-semibold" />
-                  <input id="d-C-pzs" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs" />
+
+              <!-- C (Chiltepec) -->
+              <div class="bg-white rounded-xl p-2 border-2 border-purple-200 text-center shadow-xs space-y-1.5">
+                <div class="flex items-center justify-center gap-1.5">
+                  <span class="w-7 h-7 rounded-lg bg-purple-600 text-white font-black text-base flex items-center justify-center shadow-xs">C</span>
+                  <span class="text-[10px] font-bold text-purple-900">Chilte</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1 text-[10px] font-bold text-slate-400">
+                  <span>PQ</span><span>PZ</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1">
+                  <input id="d-C-paq" type="number" inputmode="numeric" value="${d.dCpaq||0}" class="h-11 w-full rounded-lg border border-slate-300 text-center text-sm font-extrabold text-slate-800 outline-none focus:border-purple-600" />
+                  <input id="d-C-pzs" type="number" inputmode="numeric" value="${d.dCpzs||0}" class="h-11 w-full rounded-lg border border-slate-300 text-center text-sm font-extrabold text-slate-800 outline-none focus:border-purple-600" />
                 </div>
               </div>
-              <div class="bg-brand-50 rounded-lg p-1 text-center">
-                <div class="font-bold text-brand-700 text-xs">R</div>
-                <div class="text-[9px] text-slate-400">PQ · PZ</div>
-                <div class="flex gap-0.5 justify-center mt-0.5">
-                  <input id="d-R-paq" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs font-semibold" />
-                  <input id="d-R-pzs" type="number" value="0" class="w-9 px-0.5 py-1 rounded border text-center text-xs" />
+
+              <!-- R (Rodríguez) -->
+              <div class="bg-white rounded-xl p-2 border-2 border-emerald-200 text-center shadow-xs space-y-1.5">
+                <div class="flex items-center justify-center gap-1.5">
+                  <span class="w-7 h-7 rounded-lg bg-emerald-600 text-white font-black text-base flex items-center justify-center shadow-xs">R</span>
+                  <span class="text-[10px] font-bold text-emerald-900">Rdgz</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1 text-[10px] font-bold text-slate-400">
+                  <span>PQ</span><span>PZ</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1">
+                  <input id="d-R-paq" type="number" inputmode="numeric" value="${d.dRpaq||0}" class="h-11 w-full rounded-lg border border-slate-300 text-center text-sm font-extrabold text-slate-800 outline-none focus:border-emerald-600" />
+                  <input id="d-R-pzs" type="number" inputmode="numeric" value="${d.dRpzs||0}" class="h-11 w-full rounded-lg border border-slate-300 text-center text-sm font-extrabold text-slate-800 outline-none focus:border-emerald-600" />
                 </div>
               </div>
             </div>
-            <button id="btn-dictar-dist" class="w-11 h-11 rounded-full bg-brand-600 text-white flex items-center justify-center text-lg shrink-0 mt-1">🎙</button>
+
+            <button id="btn-dictar-dist" title="Dictar distribución" class="w-12 h-16 rounded-2xl bg-brand-600 hover:bg-brand-700 active:scale-95 text-white flex flex-col items-center justify-center text-lg shrink-0 shadow-sm transition-all">
+              <span>🎙</span>
+              <span class="text-[9px] font-bold">Voz</span>
+            </button>
           </div>
-          <div id="d-validacion" class="text-xs font-medium text-amber-600 mt-1">Falta distribuir</div>
         </div>
 
-        <div class="grid grid-cols-[1fr_1fr_auto] gap-1.5 items-end">
+        <!-- Precio, Proveedor y Guardar -->
+        <div class="grid grid-cols-[1fr_1.2fr_auto] gap-2 items-end pt-1">
           <div>
-            <label class="text-[10px] text-slate-500">Precio</label>
-            <input id="p-precio" type="number" inputmode="decimal" class="w-full px-2 py-2 rounded-lg border text-sm" placeholder="0" />
+            <label class="block text-[11px] font-bold text-slate-700 mb-1">Precio Unit.</label>
+            <div class="relative">
+              <span class="absolute left-2.5 top-2.5 text-slate-400 text-xs font-bold">$</span>
+              <input id="p-precio" type="number" step="any" inputmode="decimal" value="${escapeHtml(d.precio||"")}" class="w-full pl-6 pr-2 py-2 rounded-xl border border-slate-300 focus:border-brand-600 text-sm font-bold text-slate-800 outline-none" placeholder="0.00" />
+            </div>
           </div>
+
           <div>
-            <label class="text-[10px] text-slate-500">Proveedor</label>
-            <input id="p-proveedor" class="w-full px-2 py-2 rounded-lg border text-sm" placeholder="Proveedor" />
+            <label class="block text-[11px] font-bold text-slate-700 mb-1">Proveedor</label>
+            <input id="p-proveedor" value="${escapeHtml(d.proveedor||"")}" class="w-full px-2.5 py-2 rounded-xl border border-slate-300 focus:border-brand-600 text-sm font-semibold text-slate-800 outline-none" placeholder="Nombre prov." />
           </div>
-          <button id="btn-guardar" class="px-3 py-2 bg-brand-600 text-white rounded-lg text-xs font-bold leading-tight h-[42px]">Guardar</button>
+
+          <button id="btn-guardar" class="px-4 py-2.5 bg-brand-600 hover:bg-brand-700 active:scale-95 text-white rounded-xl text-xs font-black h-[42px] shadow-md transition-all flex items-center gap-1.5">
+            <span>💾</span><span>Guardar</span>
+          </button>
         </div>
-        <div class="text-[10px] text-slate-500">Nota: <span id="p-nota-auto" class="font-semibold text-brand-700"></span></div>
+
+        <div class="flex justify-between items-center text-[11px] text-slate-500 pt-1 border-t border-slate-100">
+          <span>Nota de compra: <b id="p-nota-auto" class="text-brand-700"></b></span>
+        </div>
       `;
       wrap.appendChild(card);
 
-      wrap.appendChild(el("div",{class:"text-sm font-bold text-brand-900 mt-1"},"Registros recientes"));
-      const list=el("div",{id:"lista-reciente",class:"space-y-1 max-h-36 overflow-y-auto no-scrollbar"});
+      // Contenedor expandido para Registros Recientes con altura cómoda
+      const recHeader = el("div",{class:"flex justify-between items-center mt-3 mb-1 px-1"});
+      recHeader.innerHTML = `
+        <span class="text-sm font-extrabold text-slate-900 flex items-center gap-1.5">
+          <span>📋</span><span>Registros recientes</span>
+        </span>
+        <span class="text-[11px] text-slate-500 font-medium">Toca precio para editar</span>
+      `;
+      wrap.appendChild(recHeader);
+
+      const list=el("div",{id:"lista-reciente",class:"space-y-2 max-h-80 sm:max-h-96 overflow-y-auto pr-1"});
       wrap.appendChild(list);
 
       let fotoBlob=null;
 
       setTimeout(async()=>{
-        $("#p-proveedor").value=await getConfig("last_proveedor","");
+        if(!$("#p-proveedor").value) {
+          $("#p-proveedor").value=await getConfig("last_proveedor","");
+        }
         $("#p-nota-auto").textContent=hoyNota();
+
+        const fotoBox=$("#foto-preview-box");
+
+        // Restore draft photo if exists
+        if(state.draft.fotoDataUrl && fotoBox){
+          fotoBox.innerHTML=`<img src="${state.draft.fotoDataUrl}" class="w-full h-full object-cover"><span class="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[8px] font-bold py-0.5 text-center">Toca p/ ver</span>`;
+        }
+
+        // Setup draft cleaner
+        const clearBtn = $("#btn-clear-draft");
+        if(clearBtn){
+          clearBtn.onclick = ()=>{
+            showAdminConfirm("¿Limpiar borrador?", "Se borrarán los campos que estabas llenando.", ()=>{
+              clearDraft();
+              render();
+            });
+          };
+        }
+
+        const updateDraft = ()=>{
+          state.draft.nombre = $("#p-nombre").value;
+          state.draft.codigo = $("#p-codigo").value;
+          state.draft.paquetes = +$("#p-paquetes").value || 0;
+          state.draft.ppp = +$("#p-ppp").value || 0;
+          state.draft.sueltas = +$("#p-sueltas").value || 0;
+          state.draft.dMpaq = +$("#d-M-paq").value || 0;
+          state.draft.dMpzs = +$("#d-M-pzs").value || 0;
+          state.draft.dCpaq = +$("#d-C-paq").value || 0;
+          state.draft.dCpzs = +$("#d-C-pzs").value || 0;
+          state.draft.dRpaq = +$("#d-R-paq").value || 0;
+          state.draft.dRpzs = +$("#d-R-pzs").value || 0;
+          state.draft.precio = $("#p-precio").value;
+          state.draft.proveedor = $("#p-proveedor").value;
+          saveDraft();
+        };
 
         ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(sel=>{
           const inp=$(sel); if(!inp) return;
           inp.addEventListener("focus",()=>{if(inp.value==="0")inp.value="";});
-          inp.addEventListener("blur",()=>{if(inp.value==="")inp.value="0";});
+          inp.addEventListener("blur",()=>{if(inp.value==="")inp.value="0";updateDraft();});
         });
+
+        $("#p-nombre").addEventListener("input", updateDraft);
+        $("#p-precio").addEventListener("input", updateDraft);
+        $("#p-proveedor").addEventListener("input", updateDraft);
+
+        // Verification of existing code & autocomplete suggestion
+        const checkExistingCode = async ()=>{
+          const cod = $("#p-codigo").value.trim().toUpperCase();
+          const avisoBox = $("#codigo-aviso");
+          if(!cod){ avisoBox.className="hidden"; avisoBox.innerHTML=""; return; }
+          const existing = await db.productos.where("codigo").equals(cod).first();
+          if(existing){
+            avisoBox.className = "bg-amber-50 border border-amber-300 rounded-xl p-2.5 text-xs text-amber-900 space-y-1.5 animate-in fade-in";
+            avisoBox.innerHTML = `
+              <div class="flex items-center gap-1.5 font-bold">
+                <span>⚠️</span>
+                <span>El código <b>${escapeHtml(existing.codigo)}</b> ya existe: "${escapeHtml(existing.nombre)}"</span>
+              </div>
+              <p class="text-[11px] text-amber-700">Precio actual: ${existing.precio_base ? fmtMoney(existing.precio_base) : "Sin precio"}</p>
+              <div class="flex gap-2 pt-0.5">
+                <button id="btn-auto-fill" class="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold shadow-xs">✨ Autocompletar datos</button>
+                <button id="btn-auto-dismiss" class="px-2.5 py-1 bg-white border border-amber-300 text-amber-800 rounded-lg text-xs font-semibold">Continuar como nuevo</button>
+              </div>
+            `;
+            avisoBox.querySelector("#btn-auto-fill").onclick = ()=>{
+              $("#p-nombre").value = existing.nombre;
+              if(existing.precio_base) $("#p-precio").value = existing.precio_base;
+              if(existing.piezas_por_paquete) $("#p-ppp").value = existing.piezas_por_paquete;
+              if(existing.foto_url){
+                state.draft.fotoDataUrl = existing.foto_url;
+                if(fotoBox) fotoBox.innerHTML = `<img src="${existing.foto_url}" class="w-full h-full object-cover"><span class="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[8px] font-bold py-0.5 text-center">Toca p/ ver</span>`;
+              }
+              avisoBox.className = "hidden";
+              updateDraft();
+              calc();
+              render();
+              toast("Datos autocompletados desde el catálogo");
+            };
+            avisoBox.querySelector("#btn-auto-dismiss").onclick = ()=>{
+              avisoBox.className = "hidden";
+            };
+          } else {
+            avisoBox.className = "hidden";
+            avisoBox.innerHTML = "";
+          }
+        };
+
+        $("#p-codigo").addEventListener("input", ()=>{
+          updateDraft();
+          checkExistingCode();
+        });
+        $("#p-codigo").addEventListener("blur", checkExistingCode);
 
         const calc=()=>{
           const paq=+$("#p-paquetes").value||0;
           const ppp=+$("#p-ppp").value||0;
           const sue=+$("#p-sueltas").value||0;
           const total=paq*ppp+sue;
-          $("#p-total").textContent=`Total: ${total} pz`;
+          $("#p-total").textContent=`${total} pz`;
           const dist={
             M:{paquetes:+$("#d-M-paq").value||0,piezas:+$("#d-M-pzs").value||0},
             C:{paquetes:+$("#d-C-paq").value||0,piezas:+$("#d-C-pzs").value||0},
@@ -508,38 +1982,93 @@
           };
           const distTotal=UBICACIONES.reduce((s,u)=>s+dist[u].paquetes*ppp+dist[u].piezas,0);
           const val=$("#d-validacion");
-          if(distTotal>total){val.textContent="Supera el total";val.className="text-xs font-medium text-red-600 mt-1";}
-          else if(distTotal===total&&total>0){val.textContent="Distribución completa";val.className="text-xs font-medium text-emerald-600 mt-1";}
-          else{val.textContent="Falta distribuir";val.className="text-xs font-medium text-amber-600 mt-1";}
+          if(distTotal>total){
+            val.textContent=`⚠️ Supera total (${distTotal}/${total})`;
+            val.className="text-[11px] font-bold text-red-600";
+          } else if(distTotal===total&&total>0){
+            val.textContent="✓ Distribución exacta";
+            val.className="text-[11px] font-bold text-emerald-600";
+          } else {
+            val.textContent=`Falta distribuir (${distTotal}/${total})`;
+            val.className="text-[11px] font-bold text-amber-600";
+          }
+          updateDraft();
           return {total,dist,ppp,paq,sue};
         };
         ["#p-paquetes","#p-ppp","#p-sueltas","#d-M-paq","#d-M-pzs","#d-C-paq","#d-C-pzs","#d-R-paq","#d-R-pzs"].forEach(s=>$(s)?.addEventListener("input",calc));
 
-        const fotoBox=$("#foto-box");
-        let longPress=null;
-        fotoBox.onclick=()=>$("#foto-input").click();
-        fotoBox.addEventListener("touchstart",()=>{
-          longPress=setTimeout(()=>{
-            fotoBlob=null;
-            fotoBox.innerHTML=`<span class="text-xl">📷</span><span>Capturar</span>`;
-            fotoBox.className="w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-[11px] font-semibold cursor-pointer select-none";
-            toast("Foto eliminada");
-          },650);
-        });
-        fotoBox.addEventListener("touchend",()=>clearTimeout(longPress));
-        fotoBox.addEventListener("touchmove",()=>clearTimeout(longPress));
+        // Manejo de fotos directo: botón cámara abre cámara en vivo / directa, opción archivo abre galería
+        const camInp = $("#input-cam-direct");
+        const fileInp = $("#input-file-direct");
 
-        $("#foto-input").onchange=async e=>{
-          const f=e.target.files[0]; if(!f) return;
-          fotoBlob=await procesarImagen(f);
-          fotoBox.innerHTML=`<img src="${URL.createObjectURL(fotoBlob)}" class="w-full h-full object-cover rounded-xl">`;
-          fotoBox.className="w-[4.5rem] h-[4.5rem] rounded-xl overflow-hidden cursor-pointer";
+        const applyPhotoBlob = async blob=>{
+          if(!blob) return;
+          fotoBlob = blob;
+          const reader = new FileReader();
+          reader.onload = e=>{
+            state.draft.fotoDataUrl = e.target.result;
+            saveDraft();
+            render();
+          };
+          reader.readAsDataURL(blob);
         };
 
+        const handleDirectFile = async file=>{
+          if(!file) return;
+          const blob = await procesarImagen(file);
+          applyPhotoBlob(blob);
+        };
+
+        const triggerCameraAction = ()=>{
+          openCameraDirectly(
+            blob => applyPhotoBlob(blob),
+            () => camInp.click()
+          );
+        };
+
+        // Botón principal de Cámara (Directo sin menú selector)
+        if($("#btn-cam-directo")) $("#btn-cam-directo").onclick = triggerCameraAction;
+
+        // Botón de Galería / Archivo
+        if($("#btn-foto-archivo")) $("#btn-foto-archivo").onclick = ()=>fileInp.click();
+
+        // Tocar la vista previa de la foto
+        if(fotoBox){
+          fotoBox.onclick = ()=>{
+            if(state.draft.fotoDataUrl){
+              showImageModal(state.draft.fotoDataUrl, $("#p-nombre").value || "Foto del producto");
+            } else {
+              triggerCameraAction();
+            }
+          };
+        }
+
+        if($("#btn-ver-foto")){
+          $("#btn-ver-foto").onclick = ()=>{
+            if(state.draft.fotoDataUrl){
+              showImageModal(state.draft.fotoDataUrl, $("#p-nombre").value || "Foto del producto");
+            }
+          };
+        }
+
+        if($("#btn-quitar-foto")){
+          $("#btn-quitar-foto").onclick = ()=>{
+            fotoBlob = null;
+            state.draft.fotoDataUrl = null;
+            saveDraft();
+            render();
+            toast("Foto eliminada");
+          };
+        }
+
+        camInp.onchange = e => handleDirectFile(e.target.files[0]);
+        fileInp.onchange = e => handleDirectFile(e.target.files[0]);
+
+        // Voice dictation handlers
         const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
         const dictar=(btn,handler)=>{
           $(btn).onclick=()=>{
-            if(!SR){toast("Sin soporte de voz","err");return;}
+            if(!SR){toast("Sin soporte de reconocimiento de voz en este navegador","err");return;}
             const r=new SR(); r.lang="es-MX";
             r.onresult=e=>handler(e.results[0][0].transcript);
             r.onerror=()=>{};
@@ -551,8 +2080,11 @@
           const {nombre,codigo}=parseNombreCodigo(texto);
           $("#p-nombre").value=nombre;
           $("#p-codigo").value=codigo;
-          toast(codigo?`Entendí: ${nombre} · ${codigo}`:`Entendí: ${nombre}`);
+          updateDraft();
+          checkExistingCode();
+          toast(codigo?`Entendido: ${nombre} · ${codigo}`:`Entendido: ${nombre}`);
         });
+
         dictar("#btn-dictar-cant",texto=>{
           const res=parseCantidades(texto);
           if(res.ok){
@@ -560,28 +2092,28 @@
             $("#p-ppp").value=res.ppp;
             $("#p-sueltas").value=res.sueltas;
             calc();
-            toast(`Entendí: ${res.paquetes} pq × ${res.ppp} pz`+(res.sueltas?` + ${res.sueltas}`:""));
-          } else toast("No entendí cantidades","warn");
+            toast(`Cantidades: ${res.paquetes} pq × ${res.ppp} pz`+(res.sueltas?` + ${res.sueltas}`:""));
+          } else toast("No se reconocieron cantidades","warn");
         });
+
         dictar("#btn-dictar-dist",texto=>{
-          const {total,ppp}=calc();
+          const {total}=calc();
           const res=parseDistribucion(texto,total);
           if(res.ok){
             UBICACIONES.forEach(u=>{
-              // Preferimos piezas; si el usuario habló de paquetes el parser actual pone en piezas
               $(`#d-${u}-paq`).value=res.distribucion[u].paquetes;
               $(`#d-${u}-pzs`).value=res.distribucion[u].piezas;
             });
             calc();
             toast(res.msg||"Distribución aplicada");
-          } else toast("No entendí distribución","warn");
+          } else toast("No se reconoció la distribución","warn");
         });
 
+        // Guardar producto
         $("#btn-guardar").onclick=async()=>{
           const nombre=$("#p-nombre").value.trim();
-          if(!nombre){toast("Nombre obligatorio","err");return;}
+          if(!nombre){toast("El nombre es obligatorio","err");return;}
           const {total,dist,ppp,paq,sue}=calc();
-          if(total<=0){toast("Indica cantidades","err");return;}
 
           const codigo=$("#p-codigo").value.trim().toUpperCase();
           const proveedor=$("#p-proveedor").value.trim();
@@ -592,184 +2124,501 @@
           if(codigo) prod=await db.productos.where("codigo").equals(codigo).first();
           if(!prod){
             const todos=await db.productos.toArray();
-            prod=todos.find(p=>p.nombre.toLowerCase()===nombre.toLowerCase());
+            prod=todos.find(p=>(p.nombre||"").toLowerCase()===nombre.toLowerCase());
           }
+
+          const inputPrecio = $("#p-precio").value.trim();
+          const precioNum = inputPrecio === "" ? null : +inputPrecio;
 
           if(!prod){
             prod={
               id:uid(), codigo:codigo||("P"+Date.now().toString().slice(-5)),
               nombre, estado:"activo", stock_total_bodega:total,
-              piezas_por_paquete:ppp, precio_base:+$("#p-precio").value||null,
-              foto_url:null, creado_en:new Date().toISOString(), synced:false
+              piezas_por_paquete:ppp, precio_base:precioNum,
+              foto_url: state.draft.fotoDataUrl || null,
+              creado_en:new Date().toISOString(), synced:false
             };
           } else {
             prod.stock_total_bodega=(prod.stock_total_bodega||0)+total;
-            if($("#p-precio").value) prod.precio_base=+$("#p-precio").value;
+            if(inputPrecio !== "") prod.precio_base = precioNum;
+            if(state.draft.fotoDataUrl && !prod.foto_url) prod.foto_url = state.draft.fotoDataUrl;
             prod.synced=false;
           }
 
-          let fUrl=null;
-          if(fotoBlob){try{fUrl=await subirImagen(fotoBlob);}catch(e){}}
-          if(fUrl) prod.foto_url=fUrl;
+          // Guardar de inmediato en base de datos local para asegurar persistencia
           await db.productos.put(prod);
 
-          const desglose=paq>0&&ppp>0
-            ? (sue>0?`${paq} PQ CON ${ppp} PZ + ${sue} = ${total} PZ`:`${paq} PQ CON ${ppp} PZ = ${total} PZ`)
-            : `${total} PZ`;
+          if(total > 0){
+            const desglose=paq>0&&ppp>0
+              ? (sue>0?`${paq} PQ CON ${ppp} PZ + ${sue} = ${total} PZ`:`${paq} PQ CON ${ppp} PZ = ${total} PZ`)
+              : `${total} PZ`;
 
-          const distTxt=UBICACIONES.map(u=>{
-            const d=dist[u];
-            const pz=d.paquetes*ppp+d.piezas;
-            return pz>0?`${u}:${pz}`:null;
-          }).filter(Boolean).join("  ");
+            const distTxt=UBICACIONES.map(u=>{
+              const d=dist[u];
+              const pz=d.paquetes*ppp+d.piezas;
+              return pz>0?`${u}:${pz}`:null;
+            }).filter(Boolean).join("  ");
 
-          await db.compras.put({
-            id:uid(), producto_id:prod.id, codigo:prod.codigo, nombre:prod.nombre,
-            fecha:new Date().toISOString().slice(0,10), proveedor, nota,
-            foto_url:fUrl||prod.foto_url, paquetes:paq, piezas_por_paquete:ppp,
-            piezas_sueltas:sue, total_piezas:total, desglose, dist_resumen:distTxt,
-            creado_en:new Date().toISOString(), creado_por:state.user.id, synced:false
-          });
+            await db.compras.put({
+              id:uid(), producto_id:prod.id, codigo:prod.codigo, nombre:prod.nombre,
+              fecha:new Date().toISOString().slice(0,10), proveedor, nota,
+              foto_url:prod.foto_url, paquetes:paq, piezas_por_paquete:ppp,
+              piezas_sueltas:sue, total_piezas:total, desglose, dist_resumen:distTxt,
+              creado_en:new Date().toISOString(), creado_por:state.user.id, synced:false
+            });
 
-          for(const u of UBICACIONES){
-            const pz=dist[u].paquetes*ppp+dist[u].piezas;
-            if(pz>0){
-              await db.envios.put({
-                id:uid(), producto_id:prod.id, nombre:prod.nombre, codigo:prod.codigo,
-                foto_url:fUrl||prod.foto_url, sucursal_destino:u,
-                total_enviado_piezas:pz, paquetes_enviados:dist[u].paquetes,
-                piezas_sueltas_enviadas:dist[u].piezas, estado:"ENVIADO",
-                fecha_envio:new Date().toISOString(), synced:false
-              });
+            for(const u of UBICACIONES){
+              const pz=dist[u].paquetes*ppp+dist[u].piezas;
+              if(pz>0){
+                await db.envios.put({
+                  id:uid(), producto_id:prod.id, nombre:prod.nombre, codigo:prod.codigo,
+                  foto_url:prod.foto_url, sucursal_destino:u,
+                  total_enviado_piezas:pz, paquetes_enviados:dist[u].paquetes,
+                  piezas_sueltas_enviadas:dist[u].piezas, estado:"ENVIADO",
+                  fecha_envio:new Date().toISOString(), synced:false
+                });
+              }
             }
           }
 
-          toast("Producto guardado");
-          $("#p-nombre").value=""; $("#p-codigo").value="";
-          $("#p-paquetes").value=0; $("#p-ppp").value=0; $("#p-sueltas").value=0;
-          $("#p-precio").value="";
-          UBICACIONES.forEach(u=>{$(`#d-${u}-paq`).value=0;$(`#d-${u}-pzs`).value=0;});
-          fotoBlob=null;
-          fotoBox.innerHTML=`<span class="text-xl">📷</span><span>Capturar</span>`;
-          fotoBox.className="w-[4.5rem] h-[4.5rem] rounded-xl bg-brand-600 text-white flex flex-col items-center justify-center text-[11px] font-semibold cursor-pointer select-none";
-          calc();
-          await cargarLista();
+          // Subida en segundo plano si hay blob
+          if(fotoBlob){
+            subirImagen(fotoBlob).then(async fUrl=>{
+              if(fUrl){
+                prod.foto_url = fUrl;
+                await db.productos.put(prod);
+                await syncAllToServer();
+              }
+            }).catch(()=>{});
+          }
+
+          await syncAllToServer();
+          toast(total > 0 ? "Producto y compra guardados exitosamente" : "Producto guardado en catálogo");
+          clearDraft();
+          render();
         };
 
         async function cargarLista(){
-          const compras=await db.compras.orderBy("creado_en").reverse().limit(20).toArray();
-          list.innerHTML=compras.length?compras.map(c=>`
-            <div class="bg-white rounded-lg p-2 shadow-sm flex gap-2 items-center text-xs" data-id="${c.id}" data-pid="${c.producto_id}">
-              ${c.foto_url?`<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
-              <div class="flex-1 min-w-0">
-                <p class="font-semibold truncate">${escapeHtml(c.nombre)}</p>
-                <p class="text-slate-500">${c.desglose||c.total_piezas+" pz"}</p>
-              </div>
-              <button class="btn-edit-rec px-2 py-1 bg-brand-100 text-brand-700 rounded text-[10px] font-semibold" data-pid="${c.producto_id}">Precio</button>
-            </div>
-          `).join(""):`<p class="text-xs text-slate-400 text-center py-3">Sin registros</p>`;
+          let compras = [];
+          try {
+            compras = (await db.compras.toArray()).sort((a,b)=>new Date(b.creado_en||0)-new Date(a.creado_en||0)).slice(0,40);
+          } catch(e){}
 
-          list.querySelectorAll(".btn-edit-rec").forEach(btn=>{
-            btn.onclick=async e=>{
+          if(!compras.length){
+            const prods = (await db.productos.toArray()).sort((a,b)=>new Date(b.creado_en||0)-new Date(a.creado_en||0)).slice(0,20);
+            if(!prods.length){
+              list.innerHTML=`<div class="bg-white rounded-2xl p-6 text-center text-xs text-slate-400">Sin registros recientes</div>`;
+              return;
+            }
+            list.innerHTML=prods.map(p=>`
+              <div class="bg-white rounded-2xl p-3 shadow-xs border border-slate-100 flex gap-3 items-center text-xs transition-all hover:border-slate-200 select-none" data-pid="${p.id}">
+                <div class="img-rec-wrap w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center shrink-0 cursor-pointer overflow-hidden border border-slate-200/60 relative">
+                  ${p.foto_url ? `<img src="${p.foto_url}" class="w-full h-full object-cover">` : `<span class="text-lg">📦</span>`}
+                  ${!p.foto_url ? `<span class="absolute inset-0 bg-brand-600/80 text-white font-bold text-[9px] flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">+Foto</span>` : ""}
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-1.5">
+                    <p class="font-extrabold text-slate-800 text-sm truncate">${escapeHtml(p.nombre)}</p>
+                    <span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold">${escapeHtml(p.codigo||"—")}</span>
+                  </div>
+                  <p class="text-slate-500 text-[11px] mt-0.5">En catálogo · Stock: ${p.stock_total_bodega||0} pz</p>
+                </div>
+                <div class="text-right shrink-0 flex flex-col items-end gap-1">
+                  <button class="btn-rec-precio font-black text-xs px-2.5 py-1 rounded-lg border transition-all ${p.precio_base ? "bg-brand-50 text-brand-700 border-brand-200 hover:bg-brand-100" : "bg-amber-50 text-amber-700 border-amber-300 hover:bg-amber-100"}" data-pid="${p.id}">
+                    ${p.precio_base ? fmtMoney(p.precio_base) : "+ Precio"}
+                  </button>
+                  <button class="btn-rec-menu text-slate-400 hover:text-slate-700 p-1 text-base leading-none" data-pid="${p.id}">•••</button>
+                </div>
+              </div>
+            `).join("");
+            setupRecListEvents();
+            return;
+          }
+
+          const prodIds = compras.map(c=>c.producto_id);
+          const prodsArr = await Promise.all(prodIds.map(pid=>db.productos.get(pid)));
+          const prodsMap = {};
+          prodsArr.forEach(p=>{ if(p) prodsMap[p.id]=p; });
+
+          list.innerHTML=compras.map(c=>{
+            const p = prodsMap[c.producto_id] || { id: c.producto_id, nombre: c.nombre, codigo: c.codigo, precio_base: null, foto_url: c.foto_url };
+            const foto = p.foto_url || c.foto_url;
+            return `
+            <div class="bg-white rounded-2xl p-3 shadow-xs border border-slate-100 flex gap-3 items-center text-xs transition-all hover:border-slate-200 select-none" data-cid="${c.id}" data-pid="${p.id}">
+              <div class="img-rec-wrap w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center shrink-0 cursor-pointer overflow-hidden border border-slate-200/60 relative">
+                ${foto ? `<img src="${foto}" class="w-full h-full object-cover">` : `<span class="text-lg">📦</span>`}
+                ${!foto ? `<span class="absolute inset-0 bg-brand-600/80 text-white font-bold text-[9px] flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">+Foto</span>` : ""}
+              </div>
+              <div class="flex-1 min-w-0 info-rec-click cursor-pointer">
+                <div class="flex items-center gap-1.5">
+                  <p class="font-extrabold text-slate-800 text-sm truncate">${escapeHtml(c.nombre)}</p>
+                  <span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold">${escapeHtml(c.codigo||"—")}</span>
+                </div>
+                <p class="text-slate-500 text-[11px] mt-0.5">${c.desglose||c.total_piezas+" pz"}</p>
+                ${c.dist_resumen ? `<p class="text-brand-600 font-bold text-[10px] mt-0.5">${c.dist_resumen}</p>` : ""}
+              </div>
+              <div class="text-right shrink-0 flex flex-col items-end gap-1">
+                <button class="btn-rec-precio font-black text-xs px-2.5 py-1 rounded-lg border transition-all ${p.precio_base ? "bg-brand-50 text-brand-700 border-brand-200 hover:bg-brand-100" : "bg-amber-50 text-amber-700 border-amber-300 hover:bg-amber-100"}" data-pid="${p.id}">
+                  ${p.precio_base ? fmtMoney(p.precio_base) : "+ Precio"}
+                </button>
+                <button class="btn-rec-menu text-slate-400 hover:text-slate-700 p-1 text-base leading-none" data-pid="${p.id}">•••</button>
+              </div>
+            </div>`;
+          }).join("");
+          setupRecListEvents();
+        }
+
+        function setupRecListEvents(){
+          // Tap on image
+          list.querySelectorAll(".img-rec-wrap").forEach(div=>{
+            div.onclick = async e=>{
               e.stopPropagation();
-              const p=await db.productos.get(btn.dataset.pid);
+              const row = div.closest("[data-pid]");
+              const p = await db.productos.get(row.dataset.pid);
               if(!p) return;
-              const nuevo=prompt("Precio:", p.precio_base??"");
-              if(nuevo===null) return;
-              p.precio_base=nuevo===""?null:+nuevo;
-              p.synced=false;
-              await db.productos.put(p);
-              toast("Precio actualizado");
+              if(p.foto_url){
+                showImageModal(p.foto_url, `${p.nombre} (${p.codigo})`);
+              } else {
+                promptPhotoCapture(async blob=>{
+                  if(!blob) return;
+                  const localUrl = URL.createObjectURL(blob);
+                  p.foto_url = localUrl;
+                  p.synced = false;
+                  await db.productos.put(p);
+                  await syncAllToServer();
+                  toast("Foto añadida");
+                  await cargarLista();
+                  try {
+                    const rUrl = await subirImagen(blob);
+                    if(rUrl){ p.foto_url = rUrl; await db.productos.put(p); await syncAllToServer(); }
+                  }catch(e){}
+                });
+              }
             };
           });
+
+          // Tap on price directly opens numeric keypad modal
+          list.querySelectorAll(".btn-rec-precio").forEach(btn=>{
+            btn.onclick = async e=>{
+              e.stopPropagation();
+              const p = await db.productos.get(btn.dataset.pid);
+              if(!p) return;
+              showNumericPrompt(`Precio para ${p.codigo || p.nombre}:`, p.precio_base, async newVal=>{
+                p.precio_base = newVal;
+                p.synced = false;
+                await db.productos.put(p);
+                await syncAllToServer();
+                toast("Precio actualizado");
+                await cargarLista();
+              });
+            };
+          });
+
+          // Tap on menu or long press opens full product menu (delete, add photo, view, etc.)
+          list.querySelectorAll(".btn-rec-menu").forEach(btn=>{
+            btn.onclick = async e=>{
+              e.stopPropagation();
+              const p = await db.productos.get(btn.dataset.pid);
+              if(!p) return;
+              showProductMenu(p, ()=>cargarLista(), ()=>cargarLista());
+            };
+          });
+
+          // Long press on row to open product menu
+          list.querySelectorAll("[data-pid]").forEach(row=>{
+            let pTimer = null;
+            row.addEventListener("touchstart",()=>{
+              pTimer = setTimeout(async ()=>{
+                const p = await db.productos.get(row.dataset.pid);
+                if(p) showProductMenu(p, ()=>cargarLista(), ()=>cargarLista());
+              }, 600);
+            });
+            row.addEventListener("touchend",()=>clearTimeout(pTimer));
+            row.addEventListener("touchmove",()=>clearTimeout(pTimer));
+          });
         }
+
         await cargarLista();
         calc();
       },0);
+
       return wrap;
     }
 
     // ===================== PRECIOS =====================
     function renderConsultar(){
-      const wrap=el("div",{class:"space-y-2"});
-      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Consulta de precios"));
-      const search=el("input",{type:"text",id:"c-search",placeholder:"🔍 Nombre o código...",class:"w-full px-3 py-2 rounded-xl border text-sm outline-none"});
-      wrap.appendChild(search);
-      const list=el("div",{id:"c-list",class:"space-y-1.5"});
-      wrap.appendChild(list);
+      const wrap=el("div",{class:"space-y-3 pb-8"});
+
+      const headerBar = el("div",{class:"flex justify-between items-center"});
+      headerBar.innerHTML = `
+        <div>
+          <h2 class="text-base font-extrabold text-slate-900 tracking-tight">Catálogo y Precios</h2>
+          <p class="text-[11px] text-slate-500">Toca el precio para editar con teclado numérico</p>
+        </div>
+        <div class="flex items-center bg-slate-200/80 p-0.5 rounded-xl border border-slate-300/60 text-xs">
+          <button id="view-grid-btn" class="px-2.5 py-1 rounded-lg font-bold transition-all ${state.preciosView==="grid"?"bg-white text-brand-700 shadow-xs":"text-slate-600"}">⊞ Cuadrícula</button>
+          <button id="view-list-btn" class="px-2.5 py-1 rounded-lg font-bold transition-all ${state.preciosView==="list"?"bg-white text-brand-700 shadow-xs":"text-slate-600"}">☰ Lista</button>
+        </div>
+      `;
+      wrap.appendChild(headerBar);
+
+      const searchBox=el("div",{class:"relative"});
+      searchBox.innerHTML=`
+        <span class="absolute left-3.5 top-2.5 text-slate-400 text-sm">🔍</span>
+        <input type="text" id="c-search" placeholder="Buscar por nombre o código..." class="w-full pl-9 pr-3.5 py-2 rounded-xl border border-slate-300 focus:border-brand-600 focus:ring-1 focus:ring-brand-600 text-sm font-medium outline-none bg-white shadow-2xs transition-all" />
+      `;
+      wrap.appendChild(searchBox);
+
+      const countBar = el("div",{class:"flex justify-between items-center px-1 text-[11px]"});
+      countBar.innerHTML = `
+        <span id="c-count" class="font-bold text-slate-500">Cargando catálogo...</span>
+        <button id="btn-precios-backup" class="text-brand-600 font-bold hover:underline flex items-center gap-1">
+          <span>🔁</span><span>Importar de GitHub / Respaldo</span>
+        </button>
+      `;
+      wrap.appendChild(countBar);
+
+      const listContainer=el("div",{id:"c-container"});
+      wrap.appendChild(listContainer);
 
       setTimeout(async()=>{
-        const prods=await db.productos.orderBy("nombre").toArray();
-        const renderList=(q="")=>{
-          const filt=prods.filter(p=>!q||(p.nombre||"").toLowerCase().includes(q.toLowerCase())||(p.codigo||"").toLowerCase().includes(q.toLowerCase()));
-          list.innerHTML=filt.length?filt.map(p=>{
-            const precio=fmtMoney(p.precio_base);
-            return `
-            <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center" data-id="${p.id}">
-              ${p.foto_url?`<img src="${p.foto_url}" class="w-11 h-11 rounded-lg object-cover">`:`<div class="w-11 h-11 rounded-lg bg-slate-100 flex items-center justify-center text-sm">📦</div>`}
-              <div class="flex-1 min-w-0">
-                <p class="font-semibold text-sm truncate">${escapeHtml(p.nombre)}</p>
-                <p class="text-[10px] text-slate-500">${escapeHtml(p.codigo||"—")}</p>
-              </div>
-              <div class="text-right min-w-[4.5rem]">
-                ${precio
-                  ? `<p class="font-bold text-sm text-brand-600">${precio}</p>`
-                  : `<p class="text-xs text-amber-600 font-semibold">$ —</p><p class="text-[9px] text-amber-500">Precio pendiente</p>`
-                }
-                ${state.user.rol==="admin"?`<button data-id="${p.id}" class="btn-precio mt-0.5 px-2 py-0.5 bg-brand-100 text-brand-700 rounded text-[10px] font-bold">Editar</button>`:""}
-              </div>
-            </div>`;
-          }).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin productos</p>`;
+        const bkpBtn = $("#btn-precios-backup");
+        if(bkpBtn) bkpBtn.onclick = ()=>showBackupModal();
 
-          // Toque corto = editar precio | Mantener = eliminar
-          list.querySelectorAll(".btn-precio").forEach(btn=>{
-            let timer=null, red=false;
-            const reset=()=>{ red=false; btn.textContent="Editar"; btn.className="btn-precio mt-0.5 px-2 py-0.5 bg-brand-100 text-brand-700 rounded text-[10px] font-bold"; };
-            btn.addEventListener("touchstart",e=>{
-              e.preventDefault();
-              timer=setTimeout(()=>{
-                red=true;
-                btn.textContent="Eliminar";
-                btn.className="btn-precio mt-0.5 px-2 py-0.5 bg-red-500 text-white rounded text-[10px] font-bold";
-              },700);
-            });
-            btn.addEventListener("touchend",async e=>{
-              e.preventDefault();
-              clearTimeout(timer);
-              if(red){
-                if(confirm("¿Eliminar este producto?")){
-                  await db.productos.delete(btn.dataset.id);
-                  toast("Producto eliminado");
-                  render();
-                } else reset();
+        // 1. Sincronizar desde el servidor central para garantizar que todos los productos se muestran siempre
+        try { await syncAllFromServer(); } catch(e){}
+
+        // Sincronización y autoreparación del catálogo:
+        // Aseguramos que cualquier producto que exista en compras pero no en productos sea recuperado
+        const compras = await db.compras.toArray();
+        const prodsExistentes = await db.productos.toArray();
+        const prodKeys = new Set(prodsExistentes.map(p=>p.id));
+        const codKeys = new Set(prodsExistentes.map(p=>p.codigo?.toUpperCase()).filter(Boolean));
+
+        let recovered = 0;
+        for(const c of compras){
+          if((c.producto_id && !prodKeys.has(c.producto_id)) || (c.codigo && !codKeys.has(c.codigo.toUpperCase()))){
+            const newP = {
+              id: c.producto_id || uid(),
+              codigo: c.codigo || ("P"+Date.now().toString().slice(-5)),
+              nombre: c.nombre || "Producto sin nombre",
+              estado: "activo",
+              stock_total_bodega: c.total_piezas || 0,
+              piezas_por_paquete: c.piezas_por_paquete || 0,
+              precio_base: null,
+              foto_url: c.foto_url || null,
+              creado_en: c.creado_en || new Date().toISOString(),
+              synced: false
+            };
+            await db.productos.put(newP);
+            prodKeys.add(newP.id);
+            if(newP.codigo) codKeys.add(newP.codigo.toUpperCase());
+            recovered++;
+          }
+        }
+        if(recovered > 0){
+          try { await syncAllToServer(); } catch(e){}
+        }
+
+        let prods = (await db.productos.toArray()).sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||""));
+
+        // Setup view toggle buttons
+        $("#view-grid-btn").onclick = ()=>{
+          state.preciosView = "grid";
+          localStorage.setItem("bodega_precios_view","grid");
+          $("#view-grid-btn").className = "px-2.5 py-1 rounded-lg font-bold transition-all bg-white text-brand-700 shadow-xs";
+          $("#view-list-btn").className = "px-2.5 py-1 rounded-lg font-bold transition-all text-slate-600";
+          renderItems($("#c-search").value);
+        };
+        $("#view-list-btn").onclick = ()=>{
+          state.preciosView = "list";
+          localStorage.setItem("bodega_precios_view","list");
+          $("#view-list-btn").className = "px-2.5 py-1 rounded-lg font-bold transition-all bg-white text-brand-700 shadow-xs";
+          $("#view-grid-btn").className = "px-2.5 py-1 rounded-lg font-bold transition-all text-slate-600";
+          renderItems($("#c-search").value);
+        };
+
+        const countBadge = $("#c-count");
+        const renderItems = (q="")=>{
+          const term = q.trim().toLowerCase();
+          const filt = prods.filter(p=>{
+            if(!term) return true;
+            return (p.nombre||"").toLowerCase().includes(term) || (p.codigo||"").toLowerCase().includes(term);
+          });
+
+          if(countBadge) countBadge.textContent = `${filt.length} producto${filt.length===1?"":"s"} en catálogo`;
+
+          if(!filt.length){
+            listContainer.className = "";
+            if(!prods.length){
+              listContainer.innerHTML = `
+                <div class="bg-white rounded-3xl p-6 text-center text-xs text-slate-500 border border-slate-200/80 shadow-xs space-y-3">
+                  <div class="w-12 h-12 mx-auto rounded-2xl bg-brand-50 text-brand-600 flex items-center justify-center text-2xl">📦</div>
+                  <div>
+                    <h3 class="font-extrabold text-sm text-slate-800">Catálogo vacío en esta sesión</h3>
+                    <p class="text-[11px] text-slate-500 mt-1 max-w-xs mx-auto leading-relaxed">
+                      El navegador almacena los datos de GitHub bajo su propio dominio. Puedes importar tu catálogo de GitHub aquí en 1 segundo usando el Respaldo JSON:
+                    </p>
+                  </div>
+                  <div class="flex flex-col sm:flex-row justify-center gap-2 pt-1 max-w-xs mx-auto">
+                    <button id="btn-empty-import" class="w-full py-2.5 px-3 bg-brand-600 hover:bg-brand-700 active:scale-95 text-white rounded-xl text-xs font-bold shadow-xs flex items-center justify-center gap-1.5 transition-all">
+                      <span>📥</span><span>Cargar Respaldo JSON</span>
+                    </button>
+                    <button id="btn-empty-go-reg" class="w-full py-2.5 px-3 bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
+                      <span>➕</span><span>Registrar Producto</span>
+                    </button>
+                  </div>
+                </div>`;
+              const impBtn = listContainer.querySelector("#btn-empty-import");
+              if(impBtn) impBtn.onclick = ()=>showBackupModal();
+              const regBtn = listContainer.querySelector("#btn-empty-go-reg");
+              if(regBtn) regBtn.onclick = ()=>{ state.view="registro"; render(); };
+            } else {
+              listContainer.innerHTML = `<div class="bg-white rounded-2xl p-8 text-center text-xs text-slate-400 border border-slate-100">No hay productos que coincidan con "${escapeHtml(q)}"</div>`;
+            }
+            return;
+          }
+
+          if(state.preciosView === "grid"){
+            // Vista de cuadrícula de 2 columnas (o 3 en pantallas mayores)
+            listContainer.className = "grid grid-cols-2 sm:grid-cols-3 gap-2.5";
+            listContainer.innerHTML = filt.map(p=>{
+              const precio = fmtMoney(p.precio_base);
+              return `
+              <div class="prod-card bg-white rounded-2xl p-2.5 shadow-xs border border-slate-200/80 flex flex-col justify-between hover:shadow-md transition-all select-none relative group" data-pid="${p.id}">
+                <div class="space-y-2">
+                  <div class="prod-img-box w-full h-28 rounded-xl bg-slate-100 flex items-center justify-center overflow-hidden cursor-pointer border border-slate-100 relative">
+                    ${p.foto_url ? `<img src="${p.foto_url}" class="w-full h-full object-cover">` : `<span class="text-3xl">📦</span>`}
+                    ${!p.foto_url ? `<span class="absolute bottom-1 right-1 bg-brand-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-xs">+Foto</span>` : ""}
+                  </div>
+                  <div>
+                    <p class="font-extrabold text-xs text-slate-900 line-clamp-2 leading-snug">${escapeHtml(p.nombre)}</p>
+                    <span class="inline-block mt-1 text-[10px] bg-slate-100 text-slate-600 font-bold px-1.5 py-0.5 rounded">${escapeHtml(p.codigo||"—")}</span>
+                  </div>
+                </div>
+
+                <div class="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between gap-1">
+                  <button class="prod-price-btn flex-1 py-1.5 px-2 rounded-xl text-center font-black text-xs transition-all ${precio ? "bg-brand-50 text-brand-700 hover:bg-brand-100 border border-brand-200" : "bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-300"}" data-pid="${p.id}">
+                    ${precio || "+ Precio"}
+                  </button>
+                  <button class="prod-menu-btn text-slate-400 hover:text-slate-700 p-1 text-base leading-none font-bold" data-pid="${p.id}">•••</button>
+                </div>
+              </div>`;
+            }).join("");
+          } else {
+            // Vista de lista horizontal
+            listContainer.className = "space-y-2";
+            listContainer.innerHTML = filt.map(p=>{
+              const precio = fmtMoney(p.precio_base);
+              return `
+              <div class="prod-card bg-white rounded-2xl p-2.5 shadow-xs border border-slate-200/80 flex gap-2.5 items-center hover:shadow-md transition-all select-none" data-pid="${p.id}">
+                <div class="prod-img-box w-12 h-12 rounded-xl bg-slate-100 shrink-0 flex items-center justify-center overflow-hidden cursor-pointer border border-slate-100 relative">
+                  ${p.foto_url ? `<img src="${p.foto_url}" class="w-full h-full object-cover">` : `<span class="text-xl">📦</span>`}
+                </div>
+                <div class="flex-1 min-w-0">
+                  <p class="font-extrabold text-xs sm:text-sm text-slate-900 truncate">${escapeHtml(p.nombre)}</p>
+                  <div class="flex items-center gap-1.5 mt-0.5">
+                    <span class="text-[10px] bg-slate-100 text-slate-600 font-bold px-1.5 py-0.5 rounded">${escapeHtml(p.codigo||"—")}</span>
+                    ${p.stock_total_bodega ? `<span class="text-[10px] text-slate-400">Stock: ${p.stock_total_bodega} pz</span>` : ""}
+                  </div>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button class="prod-price-btn py-1.5 px-3 rounded-xl font-black text-xs transition-all ${precio ? "bg-brand-50 text-brand-700 hover:bg-brand-100 border border-brand-200" : "bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-300"}" data-pid="${p.id}">
+                    ${precio || "+ Precio"}
+                  </button>
+                  <button class="prod-menu-btn text-slate-400 hover:text-slate-700 p-1 text-base leading-none font-bold" data-pid="${p.id}">•••</button>
+                </div>
+              </div>`;
+            }).join("");
+          }
+
+          // Handlers for list / grid elements
+          listContainer.querySelectorAll(".prod-img-box").forEach(box=>{
+            box.onclick = async e=>{
+              e.stopPropagation();
+              const card = box.closest("[data-pid]");
+              const p = prods.find(item=>item.id === card.dataset.pid);
+              if(!p) return;
+              if(p.foto_url){
+                showImageModal(p.foto_url, `${p.nombre} (${p.codigo})`);
               } else {
-                const p=await db.productos.get(btn.dataset.id);
-                const nuevo=prompt("Precio:", p.precio_base??"");
-                if(nuevo===null) return;
-                p.precio_base=nuevo===""?null:+nuevo;
-                p.synced=false;
-                await db.productos.put(p);
-                toast("Precio actualizado");
-                render();
+                promptPhotoCapture(async blob=>{
+                  if(!blob) return;
+                  const localUrl = URL.createObjectURL(blob);
+                  p.foto_url = localUrl;
+                  p.synced = false;
+                  await db.productos.put(p);
+                  await syncAllToServer();
+                  toast("Foto asignada");
+                  renderItems($("#c-search").value);
+                  try {
+                    const rUrl = await subirImagen(blob);
+                    if(rUrl){ p.foto_url = rUrl; await db.productos.put(p); await syncAllToServer(); }
+                  }catch(e){}
+                });
               }
-            });
-            btn.addEventListener("touchmove",()=>{clearTimeout(timer);reset();});
-            // Desktop
-            btn.onclick=async()=>{
-              const p=await db.productos.get(btn.dataset.id);
-              const nuevo=prompt("Precio:", p.precio_base??"");
-              if(nuevo===null) return;
-              p.precio_base=nuevo===""?null:+nuevo;
-              p.synced=false;
-              await db.productos.put(p);
-              toast("Precio actualizado");
-              render();
             };
           });
+
+          // Tap on price directly triggers quick numeric keyboard modal
+          listContainer.querySelectorAll(".prod-price-btn").forEach(btn=>{
+            btn.onclick = async e=>{
+              e.stopPropagation();
+              const p = prods.find(item=>item.id === btn.dataset.pid);
+              if(!p) return;
+              showNumericPrompt(`Precio para ${p.codigo || p.nombre}:`, p.precio_base, async newVal=>{
+                p.precio_base = newVal;
+                p.synced = false;
+                await db.productos.put(p);
+                await syncAllToServer();
+                toast("Precio actualizado");
+                renderItems($("#c-search").value);
+              });
+            };
+          });
+
+          // Menu button triggers options (Delete with "ADMIN: ¿Confirma eliminar X?", Change Photo, View Photo)
+          listContainer.querySelectorAll(".prod-menu-btn").forEach(btn=>{
+            btn.onclick = async e=>{
+              e.stopPropagation();
+              const p = prods.find(item=>item.id === btn.dataset.pid);
+              if(!p) return;
+              showProductMenu(p, async ()=>{
+                prods = await db.productos.orderBy("nombre").toArray();
+                renderItems($("#c-search").value);
+              }, async ()=>{
+                prods = await db.productos.orderBy("nombre").toArray();
+                renderItems($("#c-search").value);
+              });
+            };
+          });
+
+          // Long press on whole card triggers menu
+          listContainer.querySelectorAll(".prod-card").forEach(card=>{
+            let cTimer = null;
+            card.addEventListener("touchstart",()=>{
+              cTimer = setTimeout(()=>{
+                const p = prods.find(item=>item.id === card.dataset.pid);
+                if(p){
+                  showProductMenu(p, async ()=>{
+                    prods = await db.productos.orderBy("nombre").toArray();
+                    renderItems($("#c-search").value);
+                  }, async ()=>{
+                    prods = await db.productos.orderBy("nombre").toArray();
+                    renderItems($("#c-search").value);
+                  });
+                }
+              }, 600);
+            });
+            card.addEventListener("touchend",()=>clearTimeout(cTimer));
+            card.addEventListener("touchmove",()=>clearTimeout(cTimer));
+          });
         };
-        renderList();
-        search.oninput=()=>renderList(search.value);
+
+        renderItems();
+        $("#c-search").oninput = e => renderItems(e.target.value);
       },0);
+
       return wrap;
     }
 
@@ -834,6 +2683,7 @@
             n++;
           }
           if(!n){toast("No indicaste cantidades","warn");return;}
+          await syncAllToServer();
           toast(`Registrado ${n} producto(s)`);
           render();
         };
@@ -843,17 +2693,27 @@
 
     // ===================== REPORTES =====================
     function renderReportes(){
-      const wrap=el("div",{class:"space-y-2"});
-      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Reportes"));
-      const tabs=el("div",{class:"flex gap-1.5 flex-wrap"});
-      ["compra","traslado","recepciones"].forEach(t=>{
+      const wrap=el("div",{class:"space-y-3 pb-8"});
+      wrap.appendChild(el("h2",{class:"text-base font-extrabold text-slate-900 tracking-tight"},"Reportes"));
+
+      const tabs=el("div",{class:"grid grid-cols-4 gap-1 pb-1"});
+      [
+        ["compra","Compra","📦"],
+        ["traslado","Traslado","🚚"],
+        ["recepciones","Recepción","📥"],
+        ["diferencias","Diferencias","⚖️"]
+      ].forEach(([t,label,icon])=>{
+        const active = (state.rtab||"compra") === t;
         tabs.appendChild(el("button",{
-          class:`px-3 py-1.5 rounded-full text-xs font-medium ${state.rtab===t?"bg-brand-600 text-white":"bg-white shadow text-slate-600"}`,
+          class:`py-2 px-0.5 rounded-xl font-black flex flex-col items-center justify-center gap-0.5 shrink-0 transition-all ${active?"bg-brand-600 text-white shadow-xs":"bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"}`,
           onclick:()=>{state.rtab=t;render();}
-        },t.toUpperCase()));
+        },
+          el("span",{class:"text-base"},icon),
+          el("span",{class:"text-[10px] leading-tight font-extrabold tracking-tight"},label)
+        ));
       });
       wrap.appendChild(tabs);
-      const body=el("div",{id:"rep-body",class:"mt-2 space-y-1.5"});
+      const body=el("div",{id:"rep-body",class:"space-y-2.5"});
       wrap.appendChild(body);
 
       setTimeout(async()=>{
@@ -866,27 +2726,36 @@
             if(!porNota[k]) porNota[k]={nota:k,proveedor:c.proveedor,fecha:c.fecha,items:[]};
             porNota[k].items.push(c);
           });
-          body.innerHTML=Object.values(porNota).map(g=>`
-            <div class="bg-white rounded-xl p-3 shadow-sm">
-              <div class="flex justify-between items-center mb-2">
+          const comprasArr = Object.values(porNota);
+          body.innerHTML=comprasArr.length ? comprasArr.map(g=>`
+            <div class="bg-white rounded-2xl p-3.5 shadow-xs border border-slate-200/80 space-y-2.5">
+              <div class="flex justify-between items-center pb-2 border-b border-slate-100">
                 <div>
-                  <p class="font-bold text-sm">COMPRA ${escapeHtml(g.nota)}</p>
-                  <p class="text-[10px] text-slate-500">${escapeHtml(g.proveedor||"—")} · ${g.fecha}</p>
+                  <p class="font-black text-sm text-slate-900">COMPRA: ${escapeHtml(g.nota)}</p>
+                  <p class="text-[11px] text-slate-500 font-medium">Proveedor: <b>${escapeHtml(g.proveedor||"—")}</b> · ${g.fecha}</p>
                 </div>
-                <button data-nota="${g.nota}" class="btn-pdf-compra px-2.5 py-1 bg-brand-600 text-white rounded-lg text-[10px] font-semibold">PDF</button>
+                <!-- UN solo botón de PDF para toda la compra -->
+                <button data-nota="${g.nota}" class="btn-pdf-compra px-3 py-1.5 bg-brand-600 hover:bg-brand-700 active:scale-95 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all">
+                  <span>📄</span><span>PDF Compra</span>
+                </button>
               </div>
-              ${g.items.map(c=>`
-                <div class="flex gap-2 items-center py-1.5 border-t border-slate-100 text-xs">
-                  ${c.foto_url?`<img src="${c.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
-                  <div class="flex-1 min-w-0">
-                    <p class="font-semibold truncate">${escapeHtml(c.nombre)}</p>
-                    <p class="text-slate-500">${c.desglose||c.total_piezas+" pz"}</p>
-                    ${c.dist_resumen?`<p class="text-brand-600 text-[10px]">${c.dist_resumen}</p>`:""}
+              <div class="space-y-2">
+                ${g.items.map(c=>`
+                  <div class="flex gap-2.5 items-center text-xs">
+                    <div class="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center shrink-0 overflow-hidden border border-slate-100">
+                      ${c.foto_url?`<img src="${c.foto_url}" class="w-full h-full object-cover">`:`<span>📦</span>`}
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <p class="font-extrabold text-slate-800 truncate">${escapeHtml(c.nombre)}</p>
+                      <p class="text-slate-500 text-[11px]">${c.desglose||c.total_piezas+" pz"}</p>
+                      ${c.dist_resumen?`<p class="text-brand-600 font-bold text-[10px]">${c.dist_resumen}</p>`:""}
+                    </div>
                   </div>
-                </div>
-              `).join("")}
+                `).join("")}
+              </div>
             </div>
-          `).join("")||`<p class="text-xs text-slate-400 text-center py-6">No hay compras</p>`;
+          `).join("") : `<div class="bg-white rounded-2xl p-8 text-center text-xs text-slate-400 border border-slate-100">No hay compras registradas</div>`;
+
           body.querySelectorAll(".btn-pdf-compra").forEach(btn=>{
             btn.onclick=()=>generarPDFCompra(btn.dataset.nota,porNota[btn.dataset.nota]);
           });
@@ -897,20 +2766,28 @@
           envios.forEach(e=>{
             const k=e.producto_id||e.nombre;
             if(!porProd[k]) porProd[k]={nombre:e.nombre,codigo:e.codigo,foto_url:e.foto_url,dist:[]};
-            porProd[k].dist.push(`${e.sucursal_destino}:${e.total_enviado_piezas}pz`);
+            porProd[k].dist.push(`${e.sucursal_destino}: ${e.total_enviado_piezas} pz`);
           });
           const items=Object.values(porProd);
           body.innerHTML=`
-            ${items.length?`<div class="flex justify-end mb-2"><button id="btn-pdf-traslado" class="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-xs font-semibold">PDF</button></div>`:""}
+            ${items.length?`
+              <div class="flex justify-between items-center mb-1">
+                <span class="text-xs font-bold text-slate-600">${items.length} producto(s) en traslado</span>
+                <button id="btn-pdf-traslado" class="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs">
+                  <span>📄</span><span>Generar Hoja de Traslado (PDF)</span>
+                </button>
+              </div>`:""}
             ${items.length?items.map(p=>`
-              <div class="bg-white rounded-xl p-2.5 shadow-sm flex gap-2 items-center text-xs">
-                ${p.foto_url?`<img src="${p.foto_url}" class="w-10 h-10 rounded object-cover">`:`<div class="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">📦</div>`}
+              <div class="bg-white rounded-2xl p-3 shadow-xs border border-slate-200/80 flex gap-2.5 items-center text-xs">
+                <div class="w-11 h-11 rounded-lg bg-slate-100 shrink-0 overflow-hidden flex items-center justify-center">
+                  ${p.foto_url?`<img src="${p.foto_url}" class="w-full h-full object-cover">`:`<span>📦</span>`}
+                </div>
                 <div class="flex-1 min-w-0">
-                  <p class="font-semibold truncate">${escapeHtml(p.nombre)}</p>
-                  <p class="text-slate-500">${p.dist.join("   ")}</p>
+                  <p class="font-extrabold text-sm text-slate-800 truncate">${escapeHtml(p.nombre)}</p>
+                  <p class="text-brand-700 font-bold text-xs mt-0.5">${p.dist.join("  ·  ")}</p>
                 </div>
               </div>
-            `).join(""):`<p class="text-xs text-slate-400 text-center py-6">Nada en tránsito</p>`}
+            `).join(""):`<div class="bg-white rounded-2xl p-8 text-center text-xs text-slate-400 border border-slate-100">No hay traslados en tránsito</div>`}
           `;
           const btn=$("#btn-pdf-traslado");
           if(btn) btn.onclick=()=>generarPDFTraslado(items);
@@ -918,107 +2795,260 @@
         else if(tab==="recepciones"){
           const recepciones=await db.recepciones.toArray();
           const compras=await db.compras.toArray();
+          const envios=await db.envios.toArray();
+
           const totalComprado={};
           compras.forEach(c=>{
             const k=c.producto_id||c.nombre;
             totalComprado[k]=(totalComprado[k]||0)+(c.total_piezas||0);
           });
+
           const porProd={};
           recepciones.forEach(r=>{
             const k=r.producto_id||r.nombre;
             if(!porProd[k]) porProd[k]={nombre:r.nombre,totalReportado:0,reportes:[]};
-            porProd[k].reportes.push(`${r.usuario_id}:${r.cantidad_recibida}`);
+            porProd[k].reportes.push(r);
             porProd[k].totalReportado+=r.cantidad_recibida;
           });
-          body.innerHTML=Object.keys(porProd).length?Object.entries(porProd).map(([k,p])=>{
+
+          const keys=Object.keys(porProd);
+          body.innerHTML=keys.length ? keys.map(k=>{
+            const p = porProd[k];
             const comprado=totalComprado[k]||0;
             const sobre=p.totalReportado>comprado;
             return `
-              <div class="bg-white rounded-xl p-3 shadow-sm ${sobre?"border-2 border-red-400":""}">
-                <p class="font-semibold text-sm">${escapeHtml(p.nombre)}</p>
-                <p class="text-[10px] text-slate-500">Comprado: ${comprado} · Reportado: ${p.totalReportado}
-                  ${sobre?`<span class="text-red-600 font-bold"> ¡SOBRE-INFORME!</span>`:""}
-                </p>
-                <p class="text-xs mt-1">${p.reportes.join(" · ")}</p>
+              <div class="bg-white rounded-2xl p-3.5 shadow-xs border ${sobre?"border-2 border-red-500 bg-red-50/20":"border-slate-200/80"} space-y-2">
+                <div class="flex justify-between items-start">
+                  <div>
+                    <p class="font-extrabold text-sm text-slate-900">${escapeHtml(p.nombre)}</p>
+                    <p class="text-xs text-slate-500 mt-0.5">Comprado: <b>${comprado} pz</b> · Total reportado recibido: <b>${p.totalReportado} pz</b></p>
+                  </div>
+                  ${sobre ? `<span class="px-2 py-0.5 rounded-full bg-red-600 text-white font-black text-[10px] tracking-wide animate-pulse">¡SOBRE-INFORME!</span>` : ""}
+                </div>
+
+                <div class="pt-2 border-t border-slate-100 space-y-1.5">
+                  <p class="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Detalle por sucursal / usuario:</p>
+                  ${p.reportes.map(r=>{
+                    return `
+                    <div class="bg-slate-50 rounded-xl p-2 text-xs flex justify-between items-center border border-slate-200/70">
+                      <div>
+                        <span class="font-extrabold text-brand-800">Usuario ${escapeHtml(r.usuario_id)}</span>
+                        ${r.firma ? `<span class="text-slate-600 font-semibold"> (Firmó: ${escapeHtml(r.firma)})</span>` : ""}
+                        <p class="text-[10px] text-slate-400">${r.fecha}</p>
+                      </div>
+                      <span class="font-black text-xs text-slate-800 bg-white px-2 py-1 rounded-lg border border-slate-200">${r.cantidad_recibida} pz</span>
+                    </div>`;
+                  }).join("")}
+                </div>
               </div>`;
-          }).join(""):`<p class="text-xs text-slate-400 text-center py-6">Sin recepciones</p>`;
+          }).join("") : `<div class="bg-white rounded-2xl p-8 text-center text-xs text-slate-400 border border-slate-100">Sin recepciones reportadas</div>`;
+        }
+        else if(tab==="diferencias"){
+          // Reporte consolidado de diferencias (Enviado vs Recibido por cada sucursal)
+          const envios = await db.envios.toArray();
+          const recepciones = await db.recepciones.toArray();
+
+          const porItem = {};
+          envios.forEach(e=>{
+            const key = e.producto_id || e.nombre;
+            if(!porItem[key]) porItem[key] = { nombre: e.nombre, codigo: e.codigo, enviado: {M:0,C:0,R:0}, recibido: {M:0,C:0,R:0} };
+            const u = (e.sucursal_destino||"").toUpperCase();
+            if(porItem[key].enviado[u] !== undefined){
+              porItem[key].enviado[u] += (e.total_enviado_piezas || 0);
+            }
+          });
+
+          recepciones.forEach(r=>{
+            const key = r.producto_id || r.nombre;
+            if(!porItem[key]) porItem[key] = { nombre: r.nombre, codigo: r.codigo, enviado: {M:0,C:0,R:0}, recibido: {M:0,C:0,R:0} };
+            // Identificar sucursal por usuario_id (ej. M1 -> M, C2 -> C, R1 -> R)
+            let u = (r.usuario_id||"").charAt(0).toUpperCase();
+            if(!porItem[key].recibido[u]) u = "M"; // default fallback
+            porItem[key].recibido[u] += (r.cantidad_recibida || 0);
+          });
+
+          const diffList = Object.values(porItem);
+
+          body.innerHTML = `
+            ${diffList.length ? `
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-xs font-bold text-slate-600">Balance de Sucursales</span>
+              <button id="btn-pdf-diferencias" class="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs">
+                <span>📄</span><span>PDF Diferencias</span>
+              </button>
+            </div>` : ""}
+            ${diffList.length ? diffList.map(item=>{
+              return `
+              <div class="bg-white rounded-2xl p-3.5 shadow-xs border border-slate-200/80 space-y-2">
+                <div class="flex justify-between items-start">
+                  <div>
+                    <p class="font-extrabold text-sm text-slate-900">${escapeHtml(item.nombre)}</p>
+                    <span class="text-[10px] bg-slate-100 text-slate-600 font-bold px-1.5 py-0.5 rounded">${escapeHtml(item.codigo||"—")}</span>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-3 gap-2 pt-1">
+                  ${["M","C","R"].map(u=>{
+                    const env = item.enviado[u] || 0;
+                    const rec = item.recibido[u] || 0;
+                    const diff = rec - env;
+                    const statusClass = diff === 0 
+                      ? (env > 0 ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-slate-50 border-slate-200 text-slate-500")
+                      : (diff < 0 ? "bg-red-50 border-red-200 text-red-800" : "bg-amber-50 border-amber-200 text-amber-800");
+
+                    const diffTxt = diff === 0 
+                      ? (env > 0 ? "✓ Cuadrado" : "0 pz")
+                      : (diff < 0 ? `Faltan ${Math.abs(diff)} pz` : `Sobran +${diff} pz`);
+
+                    return `
+                    <div class="rounded-xl p-2 border ${statusClass} text-center space-y-0.5">
+                      <div class="font-black text-xs">${u === "M" ? "Misaki" : u === "C" ? "Chilte" : "Rdgz"}</div>
+                      <div class="text-[10px]">Env: <b>${env}</b> | Rec: <b>${rec}</b></div>
+                      <div class="text-[10px] font-black">${diffTxt}</div>
+                    </div>`;
+                  }).join("")}
+                </div>
+              </div>`;
+            }).join("") : `<div class="bg-white rounded-2xl p-8 text-center text-xs text-slate-400 border border-slate-100">Sin diferencias registradas</div>`}
+          `;
+
+          const pdfBtn = $("#btn-pdf-diferencias");
+          if(pdfBtn) pdfBtn.onclick = ()=>generarPDFDiferencias(diffList);
         }
       },0);
+
       return wrap;
     }
 
+    function imprimirDocumento(htmlContent){
+      let w = null;
+      try {
+        w = window.open("","_blank");
+      } catch(e){}
+      if(w){
+        w.document.write(htmlContent);
+        w.document.close();
+      } else {
+        let frame = document.getElementById("print-fallback-frame");
+        if(!frame){
+          frame = document.createElement("iframe");
+          frame.id = "print-fallback-frame";
+          frame.style.position = "fixed";
+          frame.style.right = "-9999px";
+          frame.style.bottom = "-9999px";
+          frame.style.width = "0";
+          frame.style.height = "0";
+          frame.style.border = "none";
+          document.body.appendChild(frame);
+        }
+        const doc = frame.contentWindow.document;
+        doc.open();
+        doc.write(htmlContent);
+        doc.close();
+      }
+    }
+
     function generarPDFCompra(nota,grupo){
-      const w=window.open("","_blank");
-      if(!w){toast("Permite ventanas emergentes","warn");return;}
       const filas=grupo.items.map(c=>`
         <tr>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${c.foto_url?`<img src="${c.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">`:"📦"}</td>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(c.nombre)}</b><br><span style="color:#64748b;font-size:12px;">${escapeHtml(c.codigo)}</span></td>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-size:13px;">${escapeHtml(c.desglose||c.total_piezas+" pz")}</td>
+          <td style="padding:10px;border-bottom:1px solid #e2e8f0;width:55px;">${c.foto_url?`<img src="${c.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;">`:"📦"}</td>
+          <td style="padding:10px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(c.nombre)}</b><br><span style="color:#64748b;font-size:12px;">Código: ${escapeHtml(c.codigo)}</span></td>
+          <td style="padding:10px;border-bottom:1px solid #e2e8f0;font-size:13px;text-align:right;"><b>${escapeHtml(c.desglose||c.total_piezas+" pz")}</b></td>
         </tr>`).join("");
-      w.document.write(`<!DOCTYPE html><html><head><title>COMPRA ${nota}</title>
-        <style>body{font-family:Arial,sans-serif;padding:24px;}h1{font-size:20px;margin:0 0 4px;}.meta{color:#64748b;font-size:13px;margin-bottom:20px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
+      const html = `<!DOCTYPE html><html><head><title>COMPRA ${nota}</title>
+        <style>body{font-family:Arial,sans-serif;padding:30px;color:#0f172a;}h1{font-size:22px;margin:0 0 4px;font-weight:900;}.meta{color:#64748b;font-size:13px;margin-bottom:24px;border-bottom:1px solid #e2e8f0;padding-bottom:10px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:10px;border-bottom:2px solid #0f172a;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;}</style></head><body>
         <h1>COMPRA ${escapeHtml(nota)}</h1>
-        <div class="meta">Proveedor: <b>${escapeHtml(grupo.proveedor||"—")}</b> · ${grupo.fecha}</div>
-        <table><thead><tr><th>Foto</th><th>Producto</th><th>Cantidad</th></tr></thead><tbody>${filas}</tbody></table>
-        <script>setTimeout(()=>window.print(),400);<\/script></body></html>`);
-      w.document.close();
+        <div class="meta">Proveedor: <b>${escapeHtml(grupo.proveedor||"—")}</b> &nbsp;·&nbsp; Fecha: <b>${grupo.fecha}</b></div>
+        <table><thead><tr><th>Foto</th><th>Producto</th><th style="text-align:right;">Cantidad Total</th></tr></thead><tbody>${filas}</tbody></table>
+        <script>setTimeout(()=>window.print(),400);<\/script></body></html>`;
+      imprimirDocumento(html);
     }
+
     function generarPDFTraslado(items){
-      const w=window.open("","_blank");
-      if(!w){toast("Permite ventanas emergentes","warn");return;}
       const filas=items.map(p=>`
         <tr>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${p.foto_url?`<img src="${p.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">`:"📦"}</td>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(p.nombre)}</b></td>
-          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${p.dist.join(" · ")}</td>
+          <td style="padding:10px;border-bottom:1px solid #e2e8f0;width:55px;">${p.foto_url?`<img src="${p.foto_url}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;">`:"📦"}</td>
+          <td style="padding:10px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(p.nombre)}</b><br><span style="color:#64748b;font-size:12px;">Código: ${escapeHtml(p.codigo||"—")}</span></td>
+          <td style="padding:10px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:bold;color:#1e40af;">${p.dist.join(" &nbsp;·&nbsp; ")}</td>
         </tr>`).join("");
-      w.document.write(`<!DOCTYPE html><html><head><title>TRASLADO</title>
-        <style>body{font-family:Arial,sans-serif;padding:24px;}h1{font-size:20px;margin:0 0 12px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}</style></head><body>
-        <h1>TRASLADO</h1>
-        <table><thead><tr><th>Foto</th><th>Producto</th><th>Distribución</th></tr></thead><tbody>${filas}</tbody></table>
-        <script>setTimeout(()=>window.print(),400);<\/script></body></html>`);
-      w.document.close();
+      const html = `<!DOCTYPE html><html><head><title>HOJA DE TRASLADO</title>
+        <style>body{font-family:Arial,sans-serif;padding:30px;color:#0f172a;}h1{font-size:22px;margin:0 0 4px;font-weight:900;}.meta{color:#64748b;font-size:13px;margin-bottom:24px;border-bottom:1px solid #e2e8f0;padding-bottom:10px;}table{width:100%;border-collapse:collapse;}th{text-align:left;padding:10px;border-bottom:2px solid #0f172a;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;}</style></head><body>
+        <h1>HOJA DE TRASLADO A SUCURSALES</h1>
+        <div class="meta">Fecha de emisión: <b>${new Date().toLocaleDateString("es-MX")}</b></div>
+        <table><thead><tr><th>Foto</th><th>Producto</th><th>Distribución Asignada</th></tr></thead><tbody>${filas}</tbody></table>
+        <script>setTimeout(()=>window.print(),400);<\/script></body></html>`;
+      imprimirDocumento(html);
+    }
+
+    function generarPDFDiferencias(diffList){
+      const filas = diffList.map(item=>`
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;"><b>${escapeHtml(item.nombre)}</b><br><span style="color:#64748b;font-size:11px;">${escapeHtml(item.codigo||"—")}</span></td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:center;">Env: ${item.enviado.M}<br>Rec: ${item.recibido.M}<br><b>${item.recibido.M - item.enviado.M}</b></td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:center;">Env: ${item.enviado.C}<br>Rec: ${item.recibido.C}<br><b>${item.recibido.C - item.enviado.C}</b></td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:center;">Env: ${item.enviado.R}<br>Rec: ${item.recibido.R}<br><b>${item.recibido.R - item.enviado.R}</b></td>
+        </tr>
+      `).join("");
+
+      const html = `<!DOCTYPE html><html><head><title>REPORTE DE DIFERENCIAS</title>
+        <style>body{font-family:Arial,sans-serif;padding:30px;color:#0f172a;}h1{font-size:22px;margin:0 0 4px;font-weight:900;}.meta{color:#64748b;font-size:13px;margin-bottom:20px;border-bottom:1px solid #e2e8f0;padding-bottom:10px;}table{width:100%;border-collapse:collapse;}th{text-align:center;padding:8px;border-bottom:2px solid #0f172a;font-size:12px;}th:first-child{text-align:left;}</style></head><body>
+        <h1>REPORTE DE DIFERENCIAS (ENVIADO VS RECIBIDO)</h1>
+        <div class="meta">Fecha de cálculo: <b>${new Date().toLocaleDateString("es-MX")}</b></div>
+        <table><thead><tr><th>Producto</th><th>Misaki (M)</th><th>Chiltepec (C)</th><th>Rodríguez (R)</th></tr></thead><tbody>${filas}</tbody></table>
+        <script>setTimeout(()=>window.print(),400);<\/script></body></html>`;
+      imprimirDocumento(html);
     }
 
     function renderConfig(){
-      const wrap=el("div",{class:"space-y-3"});
-      wrap.appendChild(el("h2",{class:"text-base font-bold text-brand-900"},"Usuarios"));
-      const list=el("div",{id:"user-list",class:"space-y-1.5"});
+      const wrap=el("div",{class:"space-y-3 pb-8"});
+      wrap.appendChild(el("h2",{class:"text-base font-extrabold text-slate-900 tracking-tight"},"Gestión de Usuarios y Accesos"));
+      const list=el("div",{id:"user-list",class:"space-y-2"});
       wrap.appendChild(list);
-      const form=el("div",{class:"bg-white rounded-xl p-3 shadow-sm space-y-2"});
+      const form=el("div",{class:"bg-white rounded-2xl p-4 shadow-xs border border-slate-200/80 space-y-3"});
       form.innerHTML=`
-        <p class="text-xs font-semibold text-slate-600">Agregar / Reiniciar PIN</p>
+        <p class="text-xs font-bold text-slate-700 uppercase tracking-wider">Agregar o Actualizar PIN</p>
         <div class="grid grid-cols-2 gap-2">
-          <input id="nu-id" class="px-2.5 py-2 rounded-lg border text-sm uppercase outline-none" placeholder="Código" />
-          <input id="nu-pin" class="px-2.5 py-2 rounded-lg border text-sm text-center outline-none" placeholder="PIN" maxlength="4" inputmode="numeric" />
+          <div>
+            <label class="block text-[10px] font-bold text-slate-500 mb-0.5">Usuario / Código</label>
+            <input id="nu-id" class="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold text-sm uppercase outline-none" placeholder="Ej. M4" />
+          </div>
+          <div>
+            <label class="block text-[10px] font-bold text-slate-500 mb-0.5">PIN (4 dígitos)</label>
+            <input id="nu-pin" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-bold text-center outline-none" placeholder="••••" maxlength="4" inputmode="numeric" />
+          </div>
         </div>
-        <select id="nu-rol" class="w-full px-2.5 py-2 rounded-lg border text-sm outline-none">
-          <option value="sucursal">Sucursal</option>
-          <option value="admin">Admin</option>
-        </select>
-        <button id="nu-save" class="w-full bg-brand-600 text-white py-2 rounded-lg text-sm font-bold">Guardar / Reiniciar PIN</button>
+        <div>
+          <label class="block text-[10px] font-bold text-slate-500 mb-0.5">Rol de cuenta</label>
+          <select id="nu-rol" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-semibold outline-none bg-white">
+            <option value="sucursal">Sucursal (Solo Consulta y Recibir)</option>
+            <option value="admin">Administrador (Acceso Total)</option>
+          </select>
+        </div>
+        <button id="nu-save" class="w-full bg-brand-600 hover:bg-brand-700 text-white py-2.5 rounded-xl text-xs font-bold shadow-xs">Guardar Usuario / PIN</button>
       `;
       wrap.appendChild(form);
       setTimeout(async()=>{
         async function cargarUsers(){
           const users=await db.usuarios.toArray();
           list.innerHTML=users.map(u=>`
-            <div class="bg-white rounded-xl p-2.5 shadow-sm flex justify-between items-center text-sm">
-              <div>
-                <p class="font-semibold">${escapeHtml(u.id)} ${u.id===state.user.id?"(tú)":""}</p>
-                <p class="text-[10px] text-slate-500">${u.rol}</p>
+            <div class="bg-white rounded-2xl p-3 shadow-xs border border-slate-200/80 flex justify-between items-center text-sm">
+              <div class="flex items-center gap-2.5">
+                <span class="w-8 h-8 rounded-lg bg-brand-50 text-brand-700 font-black text-xs flex items-center justify-center">${u.rol==="admin"?"👑":"📍"}</span>
+                <div>
+                  <p class="font-extrabold text-slate-800 text-xs sm:text-sm">${escapeHtml(u.id)} ${u.id===state.user.id?"<span class=\"text-[10px] font-bold bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded ml-1\">Tú</span>":""}</p>
+                  <p class="text-[10px] text-slate-500 uppercase font-semibold">${u.rol}</p>
+                </div>
               </div>
-              ${u.id!==state.user.id?`<button data-id="${u.id}" class="del-user text-xs text-red-600 font-semibold">Eliminar</button>`:""}
+              ${u.id!==state.user.id?`<button data-id="${u.id}" class="del-user text-xs text-red-600 hover:text-red-700 font-bold px-2 py-1 rounded-lg hover:bg-red-50">Eliminar</button>`:""}
             </div>
           `).join("");
           list.querySelectorAll(".del-user").forEach(btn=>{
-            btn.onclick=async()=>{
-              if(confirm("¿Eliminar "+btn.dataset.id+"?")){
+            btn.onclick=()=>{
+              showAdminConfirm(`ADMIN: ¿Confirma eliminar usuario ${btn.dataset.id}?`, "El usuario ya no podrá iniciar sesión en la aplicación.", async ()=>{
                 await db.usuarios.delete(btn.dataset.id);
-                toast("Eliminado");
+                toast("Usuario eliminado");
                 cargarUsers();
-              }
+              });
             };
           });
         }
@@ -1027,9 +3057,9 @@
           const id=$("#nu-id").value.trim().toUpperCase();
           const pin=$("#nu-pin").value.trim();
           const rol=$("#nu-rol").value;
-          if(!id||!/^\d{4}$/.test(pin)){toast("Código y PIN de 4 dígitos","err");return;}
+          if(!id||!/^\d{4}$/.test(pin)){toast("Indica código y un PIN numérico de 4 dígitos","err");return;}
           const existe=await db.usuarios.get(id);
-          if(existe){existe.pin=pin;existe.synced=false;await db.usuarios.put(existe);toast("PIN reiniciado");}
+          if(existe){existe.pin=pin;existe.rol=rol;existe.synced=false;await db.usuarios.put(existe);toast("PIN actualizado");}
           else{await db.usuarios.put({id,pin,rol,synced:false});toast("Usuario creado");}
           $("#nu-id").value="";$("#nu-pin").value="";
           cargarUsers();
@@ -1040,7 +3070,15 @@
 
     async function init(){
       await seed();
-      window.addEventListener("online",()=>{state.online=true;});
+      try {
+        await syncAllFromServer();
+        await syncAllToServer();
+      } catch(e){}
+      window.addEventListener("online",async ()=>{
+        state.online=true;
+        await syncAllFromServer();
+        render();
+      });
       window.addEventListener("offline",()=>{state.online=false;});
       render();
     }
